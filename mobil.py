@@ -17,6 +17,8 @@ from vardiya.db import (
     personel_listesi_ozet, expand_personnel_by_type, build_visit_db_rows, visit_group_label,
     visit_delete_action, subscription_label, subscription_labels_merged,
     sort_visit_groups, visit_has_pro, split_group_by_session,
+    build_subscription_calendar_meta, build_visit_summaries,
+    aggregate_visit_summaries, customer_ranking_from_summaries,
 )
 from vardiya.auth import require_auth
 
@@ -218,6 +220,11 @@ def parse_tr_date(s):
 
 def refresh_data():
     st.session_state.db_data = load_panel_data(admin=False)
+    st.session_state.pop("mobil_analiz_data", None)
+
+
+def refresh_analysis_data():
+    st.session_state.mobil_analiz_data = load_panel_data(admin=True)
 
 
 if not st.session_state.db_data:
@@ -308,7 +315,57 @@ def render_visit_card(group, sub_meta=None):
     )
 
 
-def render_visit_edit_form(group, i, customers):
+def move_kota_session(sg_gid, sg, new_date_str):
+    """Abonelik kotasını başka güne taşı."""
+    add_to_queue(
+        "Kota taşı",
+        "UPDATE jobs SET date=%s WHERE group_id=%s",
+        (new_date_str, sg_gid),
+    )
+    for r in sg:
+        r["date"] = new_date_str
+
+
+def return_kota_to_pool(sg_gid, sg):
+    """Kotayı havuza al (tarihi kaldır)."""
+    add_to_queue(
+        "Kotaya Geri Al",
+        "UPDATE jobs SET date='' WHERE group_id=%s",
+        (sg_gid,),
+    )
+    for r in sg:
+        r["date"] = ""
+
+
+def render_kota_session_controls(sg, sg_gid, key_prefix, sub_meta, default_date_str):
+    """Tek kota için havuza al / başka güne taşı."""
+    sg_rep = visit_group_label(sg)
+    sg_lbl = subscription_label(sg_rep, sub_meta) or "Kota"
+    sg_counts, _, _, _ = summarize_personnel(sg)
+    sg_badge = format_personnel_badge(sg_counts)
+    st.caption(f"**{sg_lbl.strip(' []')}** · 👷 {sg_badge}")
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        new_d = st.date_input(
+            "Yeni gün",
+            value=parse_tr_date(default_date_str),
+            min_value=min_visible_date(),
+            format="DD.MM.YYYY",
+            key=f"kota_date_{key_prefix}",
+            label_visibility="collapsed",
+        )
+    with c2:
+        if st.button("📅 Taşı", key=f"kota_move_{key_prefix}", use_container_width=True):
+            move_kota_session(sg_gid, sg, format_tr_date(new_d))
+            st.rerun()
+    with c3:
+        if st.button("🔙 Havuz", key=f"kota_pool_{key_prefix}", use_container_width=True):
+            return_kota_to_pool(sg_gid, sg)
+            st.rerun()
+
+
+def render_visit_edit_form(group, i, customers, session_label=""):
     """Aynı ziyarete ait tüm personel satırlarını tip/sayı ile düzenle."""
     j = visit_group_label(group)
     gid = j.get("group_id")
@@ -329,10 +386,8 @@ def render_visit_edit_form(group, i, customers):
     tag_opts = ["Tek seferlik", "Abonelik (kota)"]
     cur_tag_i = 1 if j.get("job_tag") == "subscription" else 0
 
-    with st.expander("✏️ İşi düzenle"):
-        if len(session_gids) > 1:
-            st.info("Bu kartta birden fazla abonelik kotası birleşik. Düzenleme için admin panelini kullanın.")
-            return
+    expander_title = f"✏️ {session_label} düzenle" if session_label else "✏️ İşi düzenle"
+    with st.expander(expander_title):
         st.caption("Telefon ve konum müşteri profilinden gelir → **👤 Müşteri** sekmesi.")
 
         em = st.selectbox("Müşteri", names_list, index=cust_idx, key=f"ed_cust_{jid}_{i}")
@@ -503,8 +558,8 @@ st.markdown("</div>", unsafe_allow_html=True)
 st.caption(f"📊 {len(jobs_list)} iş · {len(personnel)} personel · 📅 {sd_global}")
 
 st.title("📱 Vardiya")
-tab_ekle, tab_takvim, tab_musteri, tab_personel, tab_gider = st.tabs(
-    ["➕ İş", "📅 Günler", "👤 Müşteri", "👷 Personel", "💸 Gider"]
+tab_ekle, tab_takvim, tab_analiz, tab_musteri, tab_personel, tab_gider = st.tabs(
+    ["➕ İş", "📅 Günler", "📊 Analiz", "👤 Müşteri", "👷 Personel", "💸 Gider"]
 )
 
 # ========== İŞ EKLE ==========
@@ -686,23 +741,22 @@ with tab_takvim:
             jid = j.get("group_id") or j.get("id", i)
             render_visit_card(group, sub_meta)
 
+            sessions = split_group_by_session(group)
             if j.get("job_tag") == "subscription":
-                for sgi, (sg_gid, sg) in enumerate(split_group_by_session(group)):
+                st.markdown("**Kota işlemleri**")
+                for sgi, (sg_gid, sg) in enumerate(sessions):
+                    render_kota_session_controls(
+                        sg, sg_gid, f"{i}_{sgi}_{sg_gid}", sub_meta, sd,
+                    )
+                for sgi, (sg_gid, sg) in enumerate(sessions):
                     sg_rep = visit_group_label(sg)
                     sg_lbl = subscription_label(sg_rep, sub_meta) or f"Kota {sgi + 1}"
-                    sg_counts, _, _, _ = summarize_personnel(sg)
-                    sg_badge = format_personnel_badge(sg_counts)
-                    bc1, bc2 = st.columns([3, 1])
-                    bc1.caption(f"{sg_lbl.strip(' []')} · 👷 {sg_badge}")
-                    if bc2.button("🔙 Havuz", key=f"basit_back_{sg_gid}_{i}_{sgi}", help="Kotayı havuza al"):
-                        add_to_queue(
-                            "Kotaya Geri Al",
-                            "UPDATE jobs SET date='' WHERE group_id=%s",
-                            (sg_gid,),
-                        )
-                        for r in sg:
-                            r["date"] = ""
-                        st.rerun()
+                    render_visit_edit_form(
+                        sg, f"{i}_{sgi}", custs_edit,
+                        session_label=sg_lbl.strip(" []"),
+                    )
+            else:
+                render_visit_edit_form(group, i, custs_edit)
 
             act1, act2, act3 = st.columns(3)
             contact = job_musteri_telefon(j)
@@ -725,7 +779,6 @@ with tab_takvim:
                             jobs_list.remove(r)
                     st.rerun()
 
-            render_visit_edit_form(group, i, custs_edit)
             st.divider()
 
     # --- Alt: ay takvimi & bekleyen kotalar ---
@@ -778,20 +831,103 @@ with tab_takvim:
                     f"Kalan: {pending}/{pdata['total']}</div>",
                     unsafe_allow_html=True,
                 )
-                for gid, rows in sorted(pdata["sessions"].items(), key=lambda x: x[0]):
+                for sgi, (gid, rows) in enumerate(sorted(pdata["sessions"].items(), key=lambda x: x[0])):
                     counts, ucret, names, phones = summarize_personnel(rows)
                     badge = format_personnel_badge(counts, ucret)
-                    st.caption(f"👷 {badge}")
-                if st.button(f"📌 {sd} gününe ata", key=f"basit_ass_{pid}", use_container_width=True):
-                    def _kota_sira(gid):
-                        parca = gid.split("_")
-                        return int(parca[1]) if len(parca) > 1 and parca[1].isdigit() else 0
-                    sess = sorted(pdata["sessions"].keys(), key=_kota_sira)[0]
-                    add_to_queue("Tarih atama", "UPDATE jobs SET date=%s WHERE group_id=%s", (sd, sess))
-                    for job_mem in jobs_list:
-                        if job_mem.get("group_id") == sess:
-                            job_mem["date"] = sd
-                    st.rerun()
+                    rep = {"group_id": gid, "job_tag": "subscription", "name": pdata["name"]}
+                    sg_lbl = subscription_label(rep, sub_meta) or f"Kota {sgi + 1}"
+                    st.caption(f"{sg_lbl} · 👷 {badge}")
+                    pc1, pc2 = st.columns([2, 1])
+                    with pc1:
+                        pool_date = st.date_input(
+                            "Gün",
+                            value=parse_tr_date(sd),
+                            min_value=min_visible_date(),
+                            format="DD.MM.YYYY",
+                            key=f"pool_date_{pid}_{gid}",
+                            label_visibility="collapsed",
+                        )
+                    with pc2:
+                        if st.button("📌 Yerleştir", key=f"pool_place_{pid}_{gid}", use_container_width=True):
+                            move_kota_session(gid, rows, format_tr_date(pool_date))
+                            st.rerun()
+
+# ========== ANALİZ ==========
+with tab_analiz:
+    an1, an2, an3 = st.columns(3)
+    if an1.button("◀ Önceki ay", key="analiz_prev_m", use_container_width=True):
+        st.session_state._month_nav = "prev"
+        st.rerun()
+    if an2.button("📍 Bugün", key="analiz_today_m", use_container_width=True):
+        st.session_state._month_nav = "today"
+        st.rerun()
+    if an3.button("Sonraki ay ▶", key="analiz_next_m", use_container_width=True):
+        st.session_state._month_nav = "next"
+        st.rerun()
+
+    st.markdown(f"### 📊 {calendar.month_name[sm]} {sy}")
+    st.caption("Tam geçmiş analizi — mobil takvimden bağımsız.")
+
+    if st.button("🔄 Analizi yenile", key="mobil_analiz_refresh", use_container_width=True):
+        refresh_analysis_data()
+        st.rerun()
+
+    if "mobil_analiz_data" not in st.session_state:
+        refresh_analysis_data()
+
+    analiz_db = st.session_state.mobil_analiz_data
+    analiz_jobs = analiz_db.get("jobs", [])
+    analiz_custs = analiz_db.get("customers", [])
+
+    cust_opts = {"— Tümü —": None}
+    cust_opts.update({c["name"]: c["id"] for c in sorted(analiz_custs, key=lambda x: (x.get("name") or ""))})
+    sec_m = st.selectbox("Müşteri", list(cust_opts.keys()), key="mobil_analiz_musteri")
+    sec_cid = cust_opts[sec_m]
+
+    date_from = date(sy, sm, 1)
+    date_to = date(sy, sm, calendar.monthrange(sy, sm)[1])
+    sub_meta_a = build_subscription_calendar_meta(analiz_jobs)
+
+    summaries = build_visit_summaries(
+        analiz_jobs,
+        customer_id=sec_cid,
+        date_from=date_from,
+        date_to=date_to,
+        meta=sub_meta_a,
+    )
+    agg = aggregate_visit_summaries(summaries)
+
+    m1, m2 = st.columns(2)
+    m1.metric("Ziyaret", f"{agg['visits']}")
+    m2.metric("Net kâr", f"{agg['kar']:,.0f} ₺")
+    m3, m4 = st.columns(2)
+    m3.metric("Ciro", f"{agg['ciro']:,.0f} ₺")
+    m4.metric("Maliyet", f"{agg['maliyet']:,.0f} ₺")
+
+    if sec_cid is None and summaries:
+        st.markdown("**En kârlı müşteriler (bu ay)**")
+        for r in customer_ranking_from_summaries(summaries)[:8]:
+            st.caption(
+                f"**{r['name']}** · {r['visits']} ziyaret · "
+                f"💹 {r['kar']:,.0f} ₺"
+            )
+
+    if not summaries:
+        st.info("Bu ay için kayıtlı ziyaret yok.")
+    else:
+        st.markdown("**Ziyaretler**")
+        for si, s in enumerate(summaries[:25]):
+            tag_ico = "🔄" if s["job_tag"] == "subscription" else "🔹"
+            musteri_txt = f"{s['customer']} · " if sec_cid is None else ""
+            with st.expander(
+                f"{tag_ico} {musteri_txt}{s['date']}{s['sub_label']} · 💹 {s['kar']:,.0f} ₺",
+                expanded=False,
+            ):
+                st.caption(f"👷 {s['kisi']} kişi — {s['kadro_badge']}")
+                st.caption(f"🧑‍💼 {s['kadro_isimleri']}")
+                st.caption(
+                    f"💰 Ciro {s['ciro']:,.0f} ₺ · Maliyet {s['maliyet']:,.0f} ₺"
+                )
 
 # ========== MÜŞTERİ ==========
 with tab_musteri:
