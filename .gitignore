@@ -1,0 +1,25 @@
+# Gizli bilgiler — asla commit etmeyin
+.streamlit/secrets.toml
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDE / OS
+.idea/
+.vscode/
+*.log
+debug-*.log
+.DS_Store
+Thumbs.db
+
+# Yedek / lokal veri
+yedek_veriler/
+*.csv
