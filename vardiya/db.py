@@ -608,15 +608,36 @@ def get_db_connection():
     son_hata = None
     for host, user in denemeler:
         try:
-            return psycopg2.connect(
+            conn = psycopg2.connect(
                 host=host, database=s["dbname"], user=user, password=s["password"],
                 port=int(s.get("port", 5432)), cursor_factory=RealDictCursor,
                 sslmode="require", connect_timeout=10,
             )
+            return conn
         except Exception as e:
             son_hata = e
     st.error(f"Bağlantı hatası: {son_hata}")
     st.stop()
+
+
+def db_diagnostics(conn=None):
+    """Bağlantı ve tablo satır sayılarını döndür (teşhis)."""
+    s = st.secrets.get("supabase", {})
+    host_label = s.get("host") or "?"
+    counts = {}
+    errors = {}
+    if conn is None:
+        return {"host": host_label, "counts": counts, "errors": {"conn": "Bağlantı yok"}}
+    tables = ("jobs", "customers", "students", "professionals")
+    with conn.cursor() as c:
+        for tbl in tables:
+            try:
+                c.execute(f"SELECT COUNT(*) AS n FROM {tbl}")
+                counts[tbl] = int(c.fetchone()["n"])
+            except Exception as e:
+                counts[tbl] = None
+                errors[tbl] = str(e)
+    return {"host": host_label, "counts": counts, "errors": errors}
 
 
 def ensure_schema(conn):

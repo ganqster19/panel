@@ -22,6 +22,7 @@ from vardiya.db import (
     visit_delete_action, split_group_by_session, visit_customer_revenue,
     hesapla_abonelik_yukumluluk, ay_ziyaret_cirosu,
     build_visit_summaries, aggregate_visit_summaries, customer_ranking_from_summaries,
+    db_diagnostics,
 )
 
 # --- SAYFA AYARLARI ---
@@ -146,83 +147,51 @@ def get_db_connection():
     st.stop()
 
 # --- VERİ ÇEKME ---
+def _query_table(cursor, sql, label, errors):
+    """Sorgu çalıştır; hata olursa boş liste + mesaj döndür."""
+    try:
+        cursor.execute(sql)
+        return cursor.fetchall()
+    except Exception as e:
+        errors[label] = str(e)
+        return []
+
+
 def refresh_data():
     with PerfTimer("admin.py:refresh_data", "db_refresh_total", "A") as t:
         conn = get_db_connection()
+        errors = {}
         try:
             with conn.cursor() as c:
-                data = {}
+                data = {"_load_errors": errors}
                 q_start = __import__("time").perf_counter()
-                try:
-                    c.execute("SELECT j.*, c.name FROM jobs j JOIN customers c ON j.customer_id=c.id")
-                    data['jobs'] = c.fetchall()
-                except Exception:
-                    data['jobs'] = []
+                data["jobs"] = _query_table(
+                    c,
+                    "SELECT j.*, c.name FROM jobs j LEFT JOIN customers c ON j.customer_id=c.id",
+                    "jobs",
+                    errors,
+                )
                 t.extra["jobs_query_ms"] = round((__import__("time").perf_counter() - q_start) * 1000, 2)
-                t.extra["jobs_count"] = len(data['jobs'])
+                t.extra["jobs_count"] = len(data["jobs"])
+
+                data["customers"] = _query_table(c, "SELECT * FROM customers ORDER BY name", "customers", errors)
+                data["students"] = _query_table(c, "SELECT * FROM students ORDER BY name", "students", errors)
+                data["pros"] = _query_table(c, "SELECT * FROM professionals ORDER BY name", "pros", errors)
+                data["salaries"] = _query_table(c, "SELECT * FROM salary_payments", "salaries", errors)
+                data["trans"] = _query_table(c, "SELECT * FROM transactions", "trans", errors)
+                data["attendance"] = _query_table(c, "SELECT * FROM daily_attendance", "attendance", errors)
+                data["availability"] = _query_table(c, "SELECT * FROM personnel_availability", "availability", errors)
+                data["notes"] = _query_table(c, "SELECT * FROM daily_notes ORDER BY date", "notes", errors)
+                data["expenses"] = _query_table(c, "SELECT * FROM expenses ORDER BY date", "expenses", errors)
+                data["cash_inflow"] = _query_table(c, "SELECT * FROM cash_inflow", "cash_inflow", errors)
 
                 try:
-                    c.execute("SELECT * FROM customers ORDER BY name")
-                    data['customers'] = c.fetchall()
-                except Exception:
-                    data['customers'] = []
-
-                try:
-                    c.execute("SELECT * FROM students ORDER BY name")
-                    data['students'] = c.fetchall()
-                except Exception:
-                    data['students'] = []
-
-                try:
-                    c.execute("SELECT * FROM professionals ORDER BY name")
-                    data['pros'] = c.fetchall()
-                except Exception:
-                    data['pros'] = []
-
-                try:
-                    c.execute("SELECT * FROM salary_payments")
-                    data['salaries'] = c.fetchall()
-                except Exception:
-                    data['salaries'] = []
-
-                try:
-                    c.execute("SELECT * FROM transactions")
-                    data['trans'] = c.fetchall()
-                except Exception:
-                    data['trans'] = []
-
-                try:
-                    c.execute("SELECT * FROM daily_attendance")
-                    data['attendance'] = c.fetchall()
-                except Exception:
-                    data['attendance'] = []
-
-                try:
-                    c.execute("SELECT * FROM personnel_availability")
-                    data['availability'] = c.fetchall()
-                except Exception:
-                    data['availability'] = []
-
-                try:
-                    c.execute("SELECT * FROM daily_notes ORDER BY date")
-                    data['notes'] = c.fetchall()
-                except Exception:
-                    data['notes'] = []
-
-                try:
-                    c.execute("SELECT * FROM expenses ORDER BY date")
-                    data['expenses'] = c.fetchall()
-                except Exception:
-                    data['expenses'] = []
-
-                try:
-                    c.execute("SELECT * FROM cash_inflow")
-                    data['cash_inflow'] = c.fetchall()
-                except Exception:
-                    data['cash_inflow'] = []
+                    data["_db_diag"] = db_diagnostics(conn)
+                except Exception as e:
+                    data["_db_diag"] = {"host": "?", "counts": {}, "errors": {"diag": str(e)}}
 
                 st.session_state.db_data = data
-                t.extra["table_counts"] = {k: len(v) for k, v in data.items()}
+                t.extra["table_counts"] = {k: len(v) for k, v in data.items() if isinstance(v, list)}
                 return True
         except Exception as e:
             st.error(f"Veri çekme hatası: {e}")
@@ -560,9 +529,35 @@ with st.sidebar:
     </div>""", unsafe_allow_html=True)
 
     st.caption(f"🗄️ DB: {len(jobs_list)} iş · {len(db.get('customers', []))} müşteri")
+
+    load_errors = db.get("_load_errors") or {}
+    db_diag = db.get("_db_diag") or {}
+    if load_errors:
+        with st.expander("⚠️ Veritabanı sorgu hataları", expanded=True):
+            for tbl, msg in load_errors.items():
+                st.error(f"**{tbl}:** {msg}")
+    if len(jobs_list) == 0 and len(db.get("customers", [])) == 0:
+        diag_counts = db_diag.get("counts") or {}
+        if diag_counts:
+            st.warning(
+                f"Bağlanılan sunucu: `{db_diag.get('host', '?')}` · "
+                f"Supabase ham sayım — jobs: {diag_counts.get('jobs', '?')}, "
+                f"customers: {diag_counts.get('customers', '?')}"
+            )
+            if diag_counts.get("jobs", 0) and diag_counts.get("customers", 0):
+                st.info("Tablolarda veri var ama JOIN/ sorgu boş döndü — yukarıdaki hatalara bakın.")
+            elif diag_counts.get("jobs") == 0 and diag_counts.get("customers") == 0:
+                st.info(
+                    "Bağlantı başarılı ama tablolar boş görünüyor. "
+                    "Streamlit Secrets’taki **host** değerinin Supabase projenizle aynı olduğunu doğrulayın."
+                )
+        diag_errors = db_diag.get("errors") or {}
+        for tbl, msg in diag_errors.items():
+            st.error(f"Teşhis ({tbl}): {msg}")
     
     if st.button("🔄 Verileri Yenile"):
         st.cache_data.clear()
+        st.session_state.db_data = {}
         refresh_data()
         st.rerun()
 

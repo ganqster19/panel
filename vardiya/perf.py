@@ -3,7 +3,10 @@
 
 class PerfTimer:
     def __init__(self, location, message, hypothesis_id, extra=None):
-        pass
+        self.location = location
+        self.message = message
+        self.hypothesis_id = hypothesis_id
+        self.extra = extra if extra is not None else {}
 
     def __enter__(self):
         return self
