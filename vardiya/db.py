@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, date
 from typing import Optional
 from psycopg2.extras import RealDictCursor
 
-RETENTION_DAYS = 1  # dün ve sonrası görünür; daha eski kayıtlar gizlenir
+RETENTION_DAYS = 6  # son 7 gün (bugün dahil) + tarihsiz kotalar görünür
 
 JOB_INSERT_SQL = """
     INSERT INTO jobs (
@@ -42,6 +42,139 @@ def render_action_link(label, url=None, new_tab=False):
 
 
 TIP_LABELS = {"pro": "Profesyonel", "student": "Öğrenci"}
+
+JOB_TAGS = {
+    "one_time": {
+        "label": "Tek seferlik", "icon": "🔹", "css": "job-once",
+        "color": "#1565c0", "bg": "#e3f2fd", "border": "#90caf9",
+    },
+    "hotel": {
+        "label": "Otel", "icon": "🏨", "css": "job-hotel",
+        "color": "#6a1b9a", "bg": "#f3e5f5", "border": "#ce93d8",
+    },
+    "construction": {
+        "label": "İnşaat temizliği", "icon": "🏗️", "css": "job-insaat",
+        "color": "#2e7d32", "bg": "#e8f5e9", "border": "#81c784",
+    },
+    "subscription": {
+        "label": "Abonelik", "icon": "🔄", "css": "job-subs",
+        "color": "#e65100", "bg": "#fff3e0", "border": "#ffcc80",
+    },
+}
+JOB_TAG_ORDER = ("one_time", "hotel", "construction", "subscription")
+JOB_TAG_ADD_LABELS = (
+    "Tek seferlik",
+    "Otel",
+    "İnşaat temizliği",
+    "Abonelik (kota)",
+)
+
+
+def normalize_job_tag(tag) -> str:
+    t = (tag or "").strip()
+    return t if t in JOB_TAGS else "one_time"
+
+
+def is_subscription_tag(tag) -> bool:
+    return normalize_job_tag(tag) == "subscription"
+
+
+def job_tag_meta(tag):
+    return JOB_TAGS[normalize_job_tag(tag)]
+
+
+def job_tag_label(tag) -> str:
+    return job_tag_meta(tag)["label"]
+
+
+def job_tag_icon(tag) -> str:
+    return job_tag_meta(tag)["icon"]
+
+
+def job_tag_css(tag) -> str:
+    return job_tag_meta(tag)["css"]
+
+
+def job_tag_from_label(label) -> str:
+    t = (label or "").strip().casefold()
+    if t.startswith("abonelik"):
+        return "subscription"
+    if t.startswith("otel"):
+        return "hotel"
+    if t.startswith("inşaat") or t.startswith("insaat"):
+        return "construction"
+    return "one_time"
+
+
+def job_tag_option_index(tag) -> int:
+    key = normalize_job_tag(tag)
+    try:
+        return JOB_TAG_ORDER.index(key)
+    except ValueError:
+        return 0
+
+
+def job_tag_css_block() -> str:
+    parts = []
+    for meta in JOB_TAGS.values():
+        parts.append(
+            f".{meta['css']} {{ background-color: {meta['bg']}; border: 1px solid {meta['border']}; "
+            f"color: {meta['color']} !important; padding: 4px 8px; border-radius: 6px; "
+            f"font-size: 13px; display: inline-block; margin-bottom: 4px; font-weight: 700; }}"
+        )
+        parts.append(f".{meta['css']} * {{ color: {meta['color']} !important; }}")
+        parts.append(
+            f".servis-card.card-{meta['css']} {{ border-left: 6px solid {meta['color']}; }}"
+        )
+    return "\n    ".join(parts)
+
+
+def ciro_by_tag(summaries):
+    totals = {}
+    for s in summaries:
+        key = normalize_job_tag(s.get("job_tag"))
+        totals[key] = totals.get(key, 0.0) + float(s.get("ciro") or 0)
+    return totals
+
+
+def render_ciro_pie(summaries, title="Ay sonu ciro kaynağı"):
+    """Etiket bazlı pasta grafik."""
+    totals = ciro_by_tag(summaries)
+    rows = [
+        {"Etiket": job_tag_label(k), "Ciro": v, "tag": k}
+        for k, v in totals.items() if v > 0
+    ]
+    if not rows:
+        st.caption("Bu dönemde ciro yok — pasta grafik için ziyaret kaydı gerekir.")
+        return
+    try:
+        import pandas as pd
+        df = pd.DataFrame(rows)
+        import altair as alt
+        domain = [r["Etiket"] for r in rows]
+        colors = [job_tag_meta(r["tag"])["color"] for r in rows]
+        chart = (
+            alt.Chart(df)
+            .mark_arc(innerRadius=50)
+            .encode(
+                theta=alt.Theta("Ciro:Q", stack=True),
+                color=alt.Color(
+                    "Etiket:N",
+                    scale=alt.Scale(domain=domain, range=colors),
+                    legend=alt.Legend(title="Kaynak"),
+                ),
+                tooltip=["Etiket", alt.Tooltip("Ciro:Q", format=",.0f")],
+            )
+            .properties(title=title, height=300)
+        )
+        st.altair_chart(chart, use_container_width=True)
+    except Exception:
+        for r in rows:
+            st.write(f"**{r['Etiket']}:** {r['Ciro']:,.0f} ₺")
+    toplam = sum(r["Ciro"] for r in rows)
+    for r in rows:
+        pct = (r["Ciro"] / toplam * 100) if toplam else 0
+        st.caption(f"{job_tag_icon(r['tag'])} **{r['Etiket']}:** {r['Ciro']:,.0f} ₺ ({pct:.0f}%)")
 
 
 def subscription_session_no(group_id) -> Optional[int]:
@@ -104,7 +237,7 @@ def build_subscription_calendar_meta(rows):
 
 def subscription_label(job, meta=None) -> str:
     """Kota etiketi: [3/4] — admin takvimi ile aynı."""
-    if job.get("job_tag") != "subscription":
+    if not is_subscription_tag(job.get("job_tag")):
         return ""
     gid = (job.get("group_id") or "").strip()
     if not gid:
@@ -127,9 +260,9 @@ def job_visit_key(job):
     date = job.get("date") or ""
     gid = (job.get("group_id") or "").strip()
     cid = job.get("customer_id")
-    tag = job.get("job_tag") or "one_time"
+    tag = normalize_job_tag(job.get("job_tag"))
 
-    if tag == "subscription":
+    if is_subscription_tag(tag):
         pid = gid.split("_")[0] if gid else ""
         if date and cid is not None and pid:
             return (date, "subpkg", str(cid), pid)
@@ -145,21 +278,21 @@ def job_visit_key(job):
         return (date, "sub", str(job.get("id")))
 
     if cid is not None and date:
-        return (date, "once", str(cid))
+        return (date, tag, str(cid))
     if gid:
-        return (date, "once", gid)
-    return (date, "once", str(job.get("id")))
+        return (date, tag, gid)
+    return (date, tag, str(job.get("id")))
 
 
 def visit_delete_action(group):
     """Ziyaret grubunun tamamını silmek için SQL."""
     j = visit_group_label(group)
-    tag = j.get("job_tag") or "one_time"
+    tag = normalize_job_tag(j.get("job_tag"))
     gid = (j.get("group_id") or "").strip()
     date = j.get("date") or ""
     cid = j.get("customer_id")
 
-    if tag == "subscription":
+    if is_subscription_tag(tag):
         gids = {(r.get("group_id") or "").strip() for r in group if (r.get("group_id") or "").strip()}
         if len(gids) == 1:
             return ("DELETE FROM jobs WHERE group_id=%s", (next(iter(gids)),))
@@ -168,10 +301,10 @@ def visit_delete_action(group):
         ids = [r["id"] for r in group if r.get("id")]
         if ids:
             return ("DELETE FROM jobs WHERE id = ANY(%s)", (ids,))
-    if tag == "one_time" and date and cid is not None:
+    if date and cid is not None:
         return (
             "DELETE FROM jobs WHERE customer_id=%s AND COALESCE(date, '')=%s AND job_tag=%s",
-            (cid, date, "one_time"),
+            (cid, date, tag),
         )
     if gid:
         return (
@@ -293,7 +426,7 @@ def subscription_labels_merged(group, meta=None) -> str:
     """Birleşik kart için kota etiketleri: [2/4, 3/4]."""
     meta = meta or {}
     j = visit_group_label(group)
-    if j.get("job_tag") != "subscription":
+    if not is_subscription_tag(j.get("job_tag")):
         return ""
     gid_steps = []
     seen = set()
@@ -336,7 +469,7 @@ def sort_visit_groups(groups):
 def split_group_by_session(group):
     """Abonelik kartını kota (group_id) bazında alt gruplara ayır."""
     j = visit_group_label(group)
-    if j.get("job_tag") != "subscription":
+    if not is_subscription_tag(j.get("job_tag")):
         return [(j.get("group_id") or "visit", group)]
     by_gid, order = {}, []
     for r in group:
@@ -437,8 +570,8 @@ def visit_summary(group, meta=None, pros=None, students=None):
         "customer": j.get("name") or "—",
         "customer_id": j.get("customer_id"),
         "job_tag": tag,
-        "tag_label": "Abonelik" if tag == "subscription" else "Tek sefer",
-        "sub_label": subscription_labels_merged(group, meta) if tag == "subscription" else "",
+        "tag_label": job_tag_label(tag),
+        "sub_label": subscription_labels_merged(group, meta) if is_subscription_tag(tag) else "",
         "kisi": len(group),
         "counts": counts,
         "kadro_badge": format_personnel_badge(counts, ucret),
@@ -554,7 +687,7 @@ def hesapla_abonelik_yukumluluk(jobs_list, sm: int, sy: int):
 
 
 def min_visible_date() -> date:
-    """Kısıtlı panellerde görülebilir en eski gün (dün)."""
+    """Kısıtlı panellerde görülebilir en eski gün (son 1 hafta)."""
     return date.today() - timedelta(days=RETENTION_DAYS)
 
 
@@ -580,12 +713,12 @@ def is_date_visible(ds, admin: bool = False) -> bool:
 def _job_date_filter_sql(admin: bool) -> str:
     if admin:
         return ""
-    return """
+    return f"""
         AND (
             j.date IS NULL OR TRIM(j.date) = ''
             OR (
-                j.date ~ '^[0-9]{2}\\.[0-9]{2}\\.[0-9]{4}$'
-                AND TO_DATE(j.date, 'DD.MM.YYYY') >= CURRENT_DATE - INTERVAL '1 day'
+                j.date ~ '^[0-9]{{2}}\\.[0-9]{{2}}\\.[0-9]{{4}}$'
+                AND TO_DATE(j.date, 'DD.MM.YYYY') >= CURRENT_DATE - INTERVAL '{RETENTION_DAYS} days'
             )
         )
     """
@@ -594,9 +727,9 @@ def _job_date_filter_sql(admin: bool) -> str:
 def _expense_date_filter_sql(admin: bool) -> str:
     if admin:
         return ""
-    return """
-        AND e.date ~ '^[0-9]{2}\\.[0-9]{2}\\.[0-9]{4}$'
-        AND TO_DATE(e.date, 'DD.MM.YYYY') >= CURRENT_DATE - INTERVAL '1 day'
+    return f"""
+        AND e.date ~ '^[0-9]{{2}}\\.[0-9]{{2}}\\.[0-9]{{4}}$'
+        AND TO_DATE(e.date, 'DD.MM.YYYY') >= CURRENT_DATE - INTERVAL '{RETENTION_DAYS} days'
     """
 
 
@@ -677,7 +810,7 @@ def ensure_schema(conn):
 
 
 def load_panel_data(admin: bool = False):
-    """admin=True → tam veri (admin.py). admin=False → son 1 gün + tarihsiz işler."""
+    """admin=True → tam veri. admin=False → son 1 hafta + tarihsiz işler."""
     conn = get_db_connection()
     try:
         ensure_schema(conn)
@@ -695,6 +828,21 @@ def load_panel_data(admin: bool = False):
             data["customers"] = c.fetchall()
             c.execute("SELECT * FROM service_personnel ORDER BY name")
             data["service_personnel"] = c.fetchall()
+            try:
+                c.execute("SELECT * FROM students ORDER BY name")
+                data["students"] = c.fetchall()
+            except Exception:
+                data["students"] = []
+            try:
+                c.execute("SELECT * FROM professionals ORDER BY name")
+                data["pros"] = c.fetchall()
+            except Exception:
+                data["pros"] = []
+            try:
+                c.execute("SELECT * FROM personnel_availability")
+                data["availability"] = c.fetchall()
+            except Exception:
+                data["availability"] = []
             try:
                 c.execute(f"""
                     SELECT * FROM expenses e

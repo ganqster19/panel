@@ -83,5 +83,5 @@ git push -u origin main
 | Panel | Veri erişimi |
 |-------|----------------|
 | `admin.py` | Tüm geçmiş |
-| `mobil.py` | Dün ve sonrası (+ tarihsiz bekleyen kotalar) |
-| `servis.py` | Dün ve sonrası |
+| `mobil.py` | Son 1 hafta + tarihsiz bekleyen kotalar |
+| `servis.py` | Son 1 hafta |

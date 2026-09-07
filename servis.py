@@ -12,7 +12,8 @@ from vardiya.db import (
     load_panel_data, job_musteri_telefon, job_musteri_konum, render_action_link,
     min_visible_date, group_jobs_by_visit, summarize_personnel, format_personnel_html,
     visit_group_label, subscription_labels_merged,
-    sort_visit_groups, visit_has_pro,
+    sort_visit_groups, visit_has_pro, job_tag_icon, job_tag_label, job_tag_css,
+    job_tag_css_block, resolve_row_staff_name,
 )
 from vardiya.auth import require_auth
 
@@ -27,6 +28,7 @@ require_auth("servis")
 st.markdown("""
 <style>
     .block-container { padding-top: 1rem; padding-bottom: 3rem; max-width: 720px; }
+""" + job_tag_css_block() + """
     .servis-card {
         background: var(--secondary-background-color, #f8f9fa);
         border: 1px solid rgba(128, 128, 128, 0.25);
@@ -181,18 +183,31 @@ else:
         personel_line = format_personnel_html(counts, ucret, names, phones)
         contact = job_musteri_telefon(j)
         loc = maps_link(job_musteri_konum(j))
-        tag = "🔄" if j.get("job_tag") == "subscription" else "🔹"
+        icon = job_tag_icon(j.get("job_tag"))
+        etiket = job_tag_label(j.get("job_tag"))
+        css = job_tag_css(j.get("job_tag"))
         sub = subscription_labels_merged(group, sub_meta)
+        data = st.session_state.get("servis_data") or {}
+        pros_by_id = {p["id"]: p for p in data.get("pros") or []}
+        students_by_id = {s["id"]: s for s in data.get("students") or []}
+        atanan = []
+        for r in group:
+            nm, _t = resolve_row_staff_name(r, pros_by_id, students_by_id)
+            if nm and nm not in ("Profesyonel", "Öğrenci"):
+                atanan.append(nm)
         meta_lines = [
+            f'<span class="{css}">{icon} {etiket}{sub}</span>',
             f"👷 {personel_line}",
             f"📞 Müşteri: <b>{contact or '—'}</b>",
         ]
+        if atanan:
+            meta_lines.append("🎯 " + ", ".join(atanan))
         if loc:
             meta_lines.append(f'📍 <a href="{loc}" target="_blank">Konuma git</a>')
 
         st.markdown(
-            f'<div class="servis-card">'
-            f'<h3>{tag} {musteri}{sub}</h3>'
+            f'<div class="servis-card card-{css}">'
+            f'<h3>{icon} {musteri}{sub}</h3>'
             f'<div class="servis-meta">' + "<br>".join(meta_lines) + "</div>"
             f"</div>",
             unsafe_allow_html=True,

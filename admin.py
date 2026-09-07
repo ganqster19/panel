@@ -22,7 +22,9 @@ from vardiya.db import (
     visit_delete_action, split_group_by_session, visit_customer_revenue,
     hesapla_abonelik_yukumluluk, ay_ziyaret_cirosu,
     build_visit_summaries, aggregate_visit_summaries, customer_ranking_from_summaries,
-    db_diagnostics,
+    db_diagnostics, JOB_TAG_ADD_LABELS, job_tag_from_label, job_tag_label,
+    job_tag_icon, job_tag_css, job_tag_option_index, is_subscription_tag,
+    job_tag_css_block, render_ciro_pie,
 )
 
 # --- SAYFA AYARLARI ---
@@ -79,9 +81,9 @@ class Is:
         odendi_mi = False
         for i, d in enumerate(self.tarihler):
             ds = d.strftime("%d.%m.%Y") if d else ""
-            gid = f"{pkg_id}_{i}" if self.job_tag == 'subscription' else pkg_id
+            gid = f"{pkg_id}_{i}" if is_subscription_tag(self.job_tag) else pkg_id
 
-            if self.job_tag == 'subscription':
+            if is_subscription_tag(self.job_tag):
                 bu_ziyaret_tutari = self.musteri_tutari if i == 0 else 0.0
             else:
                 bu_ziyaret_tutari = self.musteri_tutari if (self.fiyat_modu == "Günlük" or not odendi_mi) else 0.0
@@ -99,8 +101,8 @@ class Is:
 # --- CSS ---
 st.markdown("""
 <style>
-    .job-subs { background-color: #fff3e0; border: 1px solid #ffcc80; color: #e65100; padding: 1px 4px; border-radius: 4px; font-size: 10px; display: block; margin-bottom: 2px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .job-once { background-color: #e3f2fd; border: 1px solid #90caf9; color: #1565c0; padding: 1px 4px; border-radius: 4px; font-size: 10px; display: block; margin-bottom: 2px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+""" + job_tag_css_block() + """
+    .job-subs, .job-once, .job-hotel, .job-insaat { padding: 1px 4px; border-radius: 4px; font-size: 10px; display: block; margin-bottom: 2px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .net-profit { color: #008f39; font-weight: bold; font-size: 12px; text-align: right; margin-top: 2px; border-top: 1px solid #eee; }
     .stButton button { width: 100%; border-radius: 5px; }
     .report-box { background-color: #f0f2f6; padding: 10px; border-radius: 5px; margin-bottom: 10px; color: #000; }
@@ -588,18 +590,19 @@ with tabs[0]:
     with c1:
         st.markdown("#### 1️⃣ Müşteri & Tarih")
         sc = st.selectbox("Müşteri", ["-"] + list(c_map.keys()), key="ib_musteri")
-        jt = st.radio("Tip", ["Tek Seferlik (Tarihli)", "Abonelik (Tarihsiz Kota)"], horizontal=True, key="ib_tip")
+        jt = st.radio("Etiket", list(JOB_TAG_ADD_LABELS), horizontal=True, key="ib_tip")
+        tag_sec = job_tag_from_label(jt)
 
-        if jt == "Tek Seferlik (Tarihli)":
+        if is_subscription_tag(tag_sec):
+            st.info("Aboneliklerde tarih seçilmez. Kota, ziyaret sayısını belirtir; takvimden istenilen günlere dağıtılır.")
+            kota = st.number_input("Kota (Toplam Ziyaret Sayısı)", min_value=1, value=4, step=1, key="ib_kota")
+            d1, d2, days = None, None, []
+        else:
             dc1, dc2 = st.columns(2)
             d1 = dc1.date_input("Başlangıç", datetime.now(), key="ib_d1")
             d2 = dc2.date_input("Bitiş", datetime.now(), key="ib_d2")
             days = st.multiselect("Günler", ["Pazartesi","Salı","Çarşamba","Perşembe","Cuma","Cumartesi","Pazar"], default=["Pazartesi"], key="ib_days")
             kota = 0
-        else:
-            st.info("Aboneliklerde tarih seçilmez. Kota, ziyaret sayısını belirtir; takvimden istenilen günlere dağıtılır.")
-            kota = st.number_input("Kota (Toplam Ziyaret Sayısı)", min_value=1, value=4, step=1, key="ib_kota")
-            d1, d2, days = None, None, []
 
         st.markdown("#### 2️⃣ Ücretlendirme")
         pc1, pc2 = st.columns(2)
@@ -648,17 +651,17 @@ with tabs[0]:
                 st.warning("Lütfen en az 1 personel girin (tip ve sayı).")
             else:
                 personeller = expand_personnel_by_type(ib_pro_n, ib_pro_u, ib_stu_n, ib_stu_u)
-                if jt == "Tek Seferlik (Tarihli)":
+                if is_subscription_tag(tag_sec):
+                    dates = [None] * int(kota)
+                    tag = 'subscription'
+                else:
                     dates = []
                     tr = ["Pazartesi","Salı","Çarşamba","Perşembe","Cuma","Cumartesi","Pazar"]
                     curr = d1
                     while curr <= d2:
                         if tr[curr.weekday()] in days: dates.append(curr)
                         curr += timedelta(1)
-                    tag = 'one_time'
-                else:
-                    dates = [None] * int(kota)
-                    tag = 'subscription'
+                    tag = tag_sec
 
                 if not dates:
                     st.warning("Seçilen aralıkta uygun bir tarih yok.")
@@ -698,7 +701,7 @@ with tabs[0]:
 
             for i, is_obj in enumerate(st.session_state.draft_jobs):
                 with st.container(border=True):
-                    baslik = "🔄 Abonelik" if is_obj.job_tag == 'subscription' else "🔹 Tek Seferlik"
+                    baslik = f"{job_tag_icon(is_obj.job_tag)} {job_tag_label(is_obj.job_tag)}"
                     st.markdown(f"**{is_obj.musteri_adi}** &nbsp; {baslik}")
                     mc1, mc2, mc3 = st.columns(3)
                     mc1.metric("👥 Personel", is_obj.personel_sayisi, label_visibility="visible")
@@ -756,7 +759,7 @@ with tabs[1]:
                             if st.button(gun_basligi, key=f"cal_{d}", use_container_width=True): st.session_state.sel_date=ds
                             if ds in day_map:
                                 for name, data in list(day_map[ds]['jobs'].items())[:3]:
-                                    css = "job-subs" if data['tag']=='subscription' else "job-once"
+                                    css = job_tag_css(data['tag'])
                                     st.markdown(f'<span class="{css}">{name} ({data["price"]:.0f}) 👥{data["kisi_sayisi"]}</span>', unsafe_allow_html=True)
                                 st.markdown(f'<div class="net-profit">{day_map[ds]["net"]:.0f}</div>', unsafe_allow_html=True)
 
@@ -784,15 +787,15 @@ with tabs[1]:
                 counts, ucret, names, phones = summarize_personnel(group)
                 badge = format_personnel_badge(counts, ucret)
                 curr_tag = j.get('job_tag', 'one_time')
-                tag_icon = "🔄" if curr_tag == 'subscription' else "🔹"
+                tag_icon = job_tag_icon(curr_tag)
                 sub_label = subscription_labels_merged(group, sub_meta)
                 gid = j.get('group_id')
                 old_date = j.get('date') or ''
                 gkey = gid or j.get('id', gi)
                 session_gids = {(r.get('group_id') or '').strip() for r in group if (r.get('group_id') or '').strip()}
 
-                with st.expander(f"{tag_icon} {j['name']}{sub_label} · 👷 {badge}"):
-                    if curr_tag == 'subscription':
+                with st.expander(f"{tag_icon} {job_tag_label(curr_tag)} · {j['name']}{sub_label} · 👷 {badge}"):
+                    if is_subscription_tag(curr_tag):
                         st.markdown("**Kota işlemleri**")
                         for sgi, (sg_gid, sg) in enumerate(split_group_by_session(group)):
                             sg_rep = visit_group_label(sg)
@@ -814,10 +817,10 @@ with tabs[1]:
                             st.caption("Birden fazla kota birleşik — düzenleme için kotayı önce havuza alın veya tek kotayı seçin.")
 
                     nt = st.selectbox(
-                        "Etiket", ["Tek Sefer", "Abonelik"],
-                        index=0 if curr_tag == 'one_time' else 1, key=f"t_{gkey}_{gi}",
+                        "Etiket", list(JOB_TAG_ADD_LABELS),
+                        index=job_tag_option_index(curr_tag), key=f"t_{gkey}_{gi}",
                     )
-                    nv = 'subscription' if nt == "Abonelik" else 'one_time'
+                    nv = job_tag_from_label(nt)
                     if nv != curr_tag and gid:
                         add_to_queue(
                             f"Etiket: {j['name']}",
@@ -968,7 +971,7 @@ with tabs[1]:
         st.divider()
         st.markdown("### 📥 TARİH BEKLEYEN KOTALAR")
         
-        unscheduled = [j for j in jobs_list if not j.get('date') and j.get('job_tag') == 'subscription']
+        unscheduled = [j for j in jobs_list if not j.get('date') and is_subscription_tag(j.get('job_tag'))]
         pkgs = {}
         for uj in unscheduled:
             pid = uj['group_id'].split('_')[0]
@@ -1134,7 +1137,7 @@ with tabs[4]:
             key="ozet_donem",
         )
     with f3:
-        tip_filt = st.selectbox("İş tipi", ["Tümü", "Tek sefer", "Abonelik"], key="ozet_tip")
+        tip_filt = st.selectbox("İş tipi", ["Tümü"] + list(JOB_TAG_ADD_LABELS), key="ozet_tip")
 
     today = date.today()
     date_from, date_to = None, None
@@ -1149,10 +1152,8 @@ with tabs[4]:
         date_to = today
 
     tag_filt = None
-    if tip_filt == "Tek sefer":
-        tag_filt = "one_time"
-    elif tip_filt == "Abonelik":
-        tag_filt = "subscription"
+    if tip_filt != "Tümü":
+        tag_filt = job_tag_from_label(tip_filt)
 
     sub_meta_ozet = build_subscription_calendar_meta(jobs_list)
     pros_ozet = db.get("pros", [])
@@ -1227,7 +1228,7 @@ with tabs[4]:
                 expanded=(sec_cid is not None and len(by_month) <= 3),
             ):
                 for s in month_visits:
-                    tag_ico = "🔄" if s["job_tag"] == "subscription" else "🔹"
+                    tag_ico = job_tag_icon(s["job_tag"])
                     tahsil_txt = ""
                     if s["tahsil"] is True:
                         tahsil_txt = " · ✅ Tahsil"
@@ -1323,6 +1324,16 @@ with tabs[5]:
     c3.metric("💹 Net Kâr", f"{toplam_kar:,.0f} ₺", f"{verimlilik:.1f}% Kâr Marjı")
     c4.metric("📋 Tamamlanan Ziyaret", f"{total_job_count} Adet")
     c5.metric("🎓 Öğrenci Ziyaretleri", f"{ogrenci_is_sayisi} Adet", f"👔 Pro: {pro_is_sayisi}")
+
+    st.markdown("#### 🥧 Ciro nereden geliyor?")
+    st.caption("Seçili ayın ziyaret cirosu etiketlere göre (otel, inşaat, tek sefer, abonelik).")
+    render_ciro_pie(
+        [
+            {"job_tag": visit_group_label(g).get("job_tag"), "ciro": visit_customer_revenue(g)}
+            for g in visit_groups_analysis
+        ],
+        title=f"{calendar.month_name[sm]} {sy} ciro dağılımı",
+    )
 
     ay_notlari = sorted(
         [n for n in db.get('notes', []) if n.get('date') and ay_arama(sm, sy) in n['date']],

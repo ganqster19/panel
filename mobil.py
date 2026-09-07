@@ -19,6 +19,9 @@ from vardiya.db import (
     sort_visit_groups, visit_has_pro, split_group_by_session,
     build_subscription_calendar_meta, build_visit_summaries,
     aggregate_visit_summaries, customer_ranking_from_summaries,
+    JOB_TAG_ADD_LABELS, job_tag_from_label, job_tag_label, job_tag_icon,
+    job_tag_css, job_tag_option_index, is_subscription_tag, job_tag_css_block,
+    resolve_row_staff_name, render_ciro_pie,
 )
 from vardiya.auth import require_auth
 
@@ -52,8 +55,8 @@ class Is:
         odendi_mi = False
         for i, d in enumerate(self.tarihler):
             ds = d.strftime("%d.%m.%Y") if d else ""
-            gid = f"{pkg_id}_{i}" if self.job_tag == "subscription" else pkg_id
-            if self.job_tag == "subscription":
+            gid = f"{pkg_id}_{i}" if is_subscription_tag(self.job_tag) else pkg_id
+            if is_subscription_tag(self.job_tag):
                 bu_ziyaret_tutari = self.musteri_tutari if i == 0 else 0.0
             else:
                 bu_ziyaret_tutari = self.musteri_tutari if (self.fiyat_modu == "Günlük" or not odendi_mi) else 0.0
@@ -77,20 +80,11 @@ st.markdown("""
     .block-container { padding-top: 1rem; padding-bottom: 5rem; max-width: 720px; }
 
     /* Sabit açık renkli kutular — metin rengi her zaman koyu */
-    .job-subs, .job-once {
+""" + job_tag_css_block() + """
+    .job-subs, .job-once, .job-hotel, .job-insaat {
         padding: 8px 10px; border-radius: 8px; font-size: 14px; display: block;
         margin-bottom: 6px; font-weight: 600; line-height: 1.3;
     }
-    .job-subs {
-        background-color: #fff3e0; border: 1px solid #ffcc80;
-        color: #e65100 !important;
-    }
-    .job-subs * { color: #e65100 !important; }
-    .job-once {
-        background-color: #e3f2fd; border: 1px solid #90caf9;
-        color: #1565c0 !important;
-    }
-    .job-once * { color: #1565c0 !important; }
     .queue-box {
         background-color: #ffebee; border: 2px solid #ef5350;
         color: #c62828 !important;
@@ -294,21 +288,35 @@ def render_tier_separator():
 def render_visit_card(group, sub_meta=None):
     j = visit_group_label(group)
     musteri = j.get("name") or "Müşteri"
+    tag_key = j.get("job_tag")
     sub_label = subscription_labels_merged(group, sub_meta) if sub_meta is not None else ""
     counts, ucret, names, phones = summarize_personnel(group)
     personel_line = format_personnel_html(counts, ucret, names, phones)
     contact = job_musteri_telefon(j)
     loc = maps_link(job_musteri_konum(j))
-    tag = "🔄" if j.get("job_tag") == "subscription" else "🔹"
+    icon = job_tag_icon(tag_key)
+    etiket = job_tag_label(tag_key)
+    css = job_tag_css(tag_key)
+    data = st.session_state.get("db_data") or {}
+    pros_by_id = {p["id"]: p for p in data.get("pros") or []}
+    students_by_id = {s["id"]: s for s in data.get("students") or []}
+    atanan = []
+    for r in group:
+        nm, _tip = resolve_row_staff_name(r, pros_by_id, students_by_id)
+        if nm and nm not in ("Profesyonel", "Öğrenci") and not str(nm).startswith("Profesyonel ") and not str(nm).startswith("Öğrenci "):
+            atanan.append(nm)
     meta_lines = [
+        f'<span class="{css}">{icon} {etiket}{sub_label}</span>',
         f"👷 {personel_line}",
         f"📞 Müşteri: <b>{contact or '—'}</b>",
     ]
+    if atanan:
+        meta_lines.append("🎯 Atanan: <b>" + ", ".join(atanan) + "</b>")
     if loc:
         meta_lines.append(f'📍 <a href="{loc}" target="_blank">Konuma git</a>')
     st.markdown(
-        f'<div class="servis-card">'
-        f'<h3>{tag} {musteri}{sub_label}</h3>'
+        f'<div class="servis-card card-{css}">'
+        f'<h3>{icon} {musteri}{sub_label}</h3>'
         f'<div class="servis-meta">' + "<br>".join(meta_lines) + "</div>"
         f"</div>",
         unsafe_allow_html=True,
@@ -383,8 +391,8 @@ def render_visit_edit_form(group, i, customers, session_label=""):
     cur_name = j.get("name") or ""
     cust_idx = names_list.index(cur_name) if cur_name in names_list else 0
 
-    tag_opts = ["Tek seferlik", "Abonelik (kota)"]
-    cur_tag_i = 1 if j.get("job_tag") == "subscription" else 0
+    tag_opts = list(JOB_TAG_ADD_LABELS)
+    cur_tag_i = job_tag_option_index(j.get("job_tag"))
 
     expander_title = f"✏️ {session_label} düzenle" if session_label else "✏️ İşi düzenle"
     with st.expander(expander_title):
@@ -398,7 +406,7 @@ def render_visit_edit_form(group, i, customers, session_label=""):
             format="DD.MM.YYYY",
             key=f"ed_date_{jid}_{i}",
         )
-        etag = st.radio("İş tipi", tag_opts, index=cur_tag_i, horizontal=True, key=f"ed_tag_{jid}_{i}")
+        etag = st.radio("Etiket", tag_opts, index=cur_tag_i, horizontal=True, key=f"ed_tag_{jid}_{i}")
         epc = st.number_input(
             "Müşteri tutarı (₺)",
             min_value=0.0,
@@ -433,7 +441,7 @@ def render_visit_edit_form(group, i, customers, session_label=""):
             else:
                 new_cid = c_map[em]
                 new_ds = format_tr_date(ed)
-                new_tag = "subscription" if "Abonelik" in etag else "one_time"
+                new_tag = job_tag_from_label(etag)
                 personeller = expand_personnel_by_type(
                     e_pro_n, e_pro_u, e_stu_n, e_stu_u, existing,
                 )
@@ -473,6 +481,87 @@ def render_visit_edit_form(group, i, customers, session_label=""):
                         "is_collected": 0, "is_worker_paid": 0,
                     })
                 st.rerun()
+
+
+def render_personnel_assignment(group, key_prefix, day_str):
+    """Slot bazında öğrenci/pro veya servis personeli ata."""
+    data = st.session_state.get("db_data") or {}
+    students = data.get("students") or []
+    pros = data.get("pros") or []
+    service = data.get("service_personnel") or []
+    availability = data.get("availability") or []
+    if not students and not pros and not service:
+        st.caption("Personel listesi boş — 👷 Personel veya admin Kişiler sekmesinden ekleyin.")
+        return
+
+    ready_ids = [
+        int(a["person_id"]) for a in availability
+        if a.get("date") == day_str and a.get("status") == "available"
+        and str(a.get("person_id", "")).lstrip("-").isdigit()
+    ]
+
+    with st.expander("🎯 Personel ata"):
+        for ri, row in enumerate(group):
+            rid = row.get("id")
+            ico = "🎓" if row.get("job_type") == "student" else "👔"
+            slot_name = row.get("staff_name") or f"{ico} #{ri + 1}"
+            aname = "atanmadı"
+            if row.get("assigned_student_id"):
+                found = [s["name"] for s in students if s["id"] == row["assigned_student_id"]]
+                if found:
+                    aname = found[0]
+            elif row.get("assigned_pro_id"):
+                found = [p["name"] for p in pros if p["id"] == row["assigned_pro_id"]]
+                if found:
+                    aname = found[0]
+            elif row.get("staff_name"):
+                aname = row["staff_name"]
+            st.caption(f"**{slot_name}** → {aname}")
+            if rid is None or str(rid).startswith("tmp_"):
+                st.caption("Kaydettikten sonra atama yapılabilir.")
+                continue
+
+            if row.get("job_type") == "student" and students:
+                musait = [s for s in students if s["id"] in ready_ids] or students
+                sl = {s["name"]: s["id"] for s in musait}
+                sel = st.selectbox("Öğrenci", list(sl.keys()), key=f"as_s_{key_prefix}_{rid}_{ri}")
+                if st.button("Ata", key=f"as_sb_{key_prefix}_{rid}_{ri}", use_container_width=True):
+                    add_to_queue(
+                        f"Atama: {sel}",
+                        "UPDATE jobs SET assigned_student_id=%s, assigned_pro_id=NULL, staff_name=%s WHERE id=%s",
+                        (sl[sel], sel, rid),
+                    )
+                    row["assigned_student_id"] = sl[sel]
+                    row["assigned_pro_id"] = None
+                    row["staff_name"] = sel
+                    st.rerun()
+            elif row.get("job_type") != "student" and pros:
+                musait = [p for p in pros if p["id"] in ready_ids] or pros
+                pl = {p["name"]: p["id"] for p in musait}
+                sel = st.selectbox("Profesyonel", list(pl.keys()), key=f"as_p_{key_prefix}_{rid}_{ri}")
+                if st.button("Ata", key=f"as_pb_{key_prefix}_{rid}_{ri}", use_container_width=True):
+                    add_to_queue(
+                        f"Atama: {sel}",
+                        "UPDATE jobs SET assigned_pro_id=%s, assigned_student_id=NULL, staff_name=%s WHERE id=%s",
+                        (pl[sel], sel, rid),
+                    )
+                    row["assigned_pro_id"] = pl[sel]
+                    row["assigned_student_id"] = None
+                    row["staff_name"] = sel
+                    st.rerun()
+            elif service:
+                sl = {s["name"]: s for s in service}
+                sel = st.selectbox("Servis personeli", list(sl.keys()), key=f"as_sv_{key_prefix}_{rid}_{ri}")
+                if st.button("Ata", key=f"as_svb_{key_prefix}_{rid}_{ri}", use_container_width=True):
+                    person = sl[sel]
+                    add_to_queue(
+                        f"Atama: {sel}",
+                        "UPDATE jobs SET staff_name=%s, staff_phone=%s WHERE id=%s",
+                        (person.get("name"), person.get("phone") or None, rid),
+                    )
+                    row["staff_name"] = person.get("name")
+                    row["staff_phone"] = person.get("phone")
+                    st.rerun()
 
 
 def sync_month_from_date(ds):
@@ -555,7 +644,7 @@ with b3:
         commit_queue()
 st.markdown("</div>", unsafe_allow_html=True)
 
-st.caption(f"📊 {len(jobs_list)} iş · {len(personnel)} personel · 📅 {sd_global}")
+st.caption(f"📊 {len(jobs_list)} iş · {len(personnel)} personel · 📅 {sd_global} · son 1 hafta")
 
 st.title("📱 Vardiya")
 tab_ekle, tab_takvim, tab_analiz, tab_musteri, tab_personel, tab_gider = st.tabs(
@@ -570,9 +659,14 @@ with tab_ekle:
 
     sc = st.selectbox("Müşteri", ["— Seçin —"] + list(c_map.keys()), key="basit_musteri")
 
-    jt = st.radio("İş tipi", ["Tek seferlik", "Abonelik (kota)"], key="basit_tip")
+    jt = st.radio("Etiket", list(JOB_TAG_ADD_LABELS), key="basit_tip")
     min_d = min_visible_date()
-    if jt == "Tek seferlik":
+    tag = job_tag_from_label(jt)
+    if is_subscription_tag(tag):
+        kota = st.number_input("Kota sayısı", min_value=1, value=4, step=1, key="basit_kota")
+        d1, d2, days = None, None, []
+        st.caption("Abonelikte tarih seçilmez; kota takvimden günlere yerleştirilir.")
+    else:
         d1 = st.date_input("Başlangıç", max(datetime.now().date(), min_d), min_value=min_d, key="basit_d1")
         d2 = st.date_input("Bitiş", max(datetime.now().date(), min_d), min_value=min_d, key="basit_d2")
         days = st.multiselect(
@@ -581,9 +675,6 @@ with tab_ekle:
             default=["Pazartesi"], key="basit_days",
         )
         kota = 0
-    else:
-        kota = st.number_input("Kota sayısı", min_value=1, value=4, step=1, key="basit_kota")
-        d1, d2, days = None, None, []
 
     tp = st.number_input("Müşteri tutarı (₺)", 0.0, step=500.0, key="basit_tp")
     pm = st.radio("Tutar türü", ["Günlük", "Toplam"], horizontal=True, key="basit_pm")
@@ -606,17 +697,15 @@ with tab_ekle:
             personeller = expand_personnel_by_type(
                 pro_sayi, pro_ucret, ogrenci_sayi, ogrenci_ucret,
             )
-            if jt == "Tek seferlik":
+            if is_subscription_tag(tag):
+                dates = [None] * int(kota)
+            else:
                 tr = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
                 dates, curr = [], d1
                 while curr <= d2:
                     if tr[curr.weekday()] in days:
                         dates.append(curr)
                     curr += timedelta(1)
-                tag = "one_time"
-            else:
-                dates = [None] * int(kota)
-                tag = "subscription"
 
             if not dates:
                 st.warning("Tarih/kota yok.")
@@ -635,7 +724,7 @@ with tab_ekle:
         st.caption("Sepet boş.")
     else:
         for i, is_obj in enumerate(st.session_state.draft_jobs):
-            tip = "🔄 Abonelik" if is_obj.job_tag == "subscription" else "🔹 Tek sefer"
+            tip = f"{job_tag_icon(is_obj.job_tag)} {job_tag_label(is_obj.job_tag)}"
             p_ozet = personel_listesi_ozet(is_obj.personeller)
             profil = cust_by_id.get(is_obj.musteri_id, {})
             tel = profil.get("phone") or "—"
@@ -742,7 +831,7 @@ with tab_takvim:
             render_visit_card(group, sub_meta)
 
             sessions = split_group_by_session(group)
-            if j.get("job_tag") == "subscription":
+            if is_subscription_tag(j.get("job_tag")):
                 st.markdown("**Kota işlemleri**")
                 for sgi, (sg_gid, sg) in enumerate(sessions):
                     render_kota_session_controls(
@@ -755,8 +844,10 @@ with tab_takvim:
                         sg, f"{i}_{sgi}", custs_edit,
                         session_label=sg_lbl.strip(" []"),
                     )
+                    render_personnel_assignment(sg, f"{i}_{sgi}", sd)
             else:
                 render_visit_edit_form(group, i, custs_edit)
+                render_personnel_assignment(group, str(i), sd)
 
             act1, act2, act3 = st.columns(3)
             contact = job_musteri_telefon(j)
@@ -808,7 +899,7 @@ with tab_takvim:
                         st.rerun()
 
     with st.expander("📥 Bekleyen kotalar", expanded=False):
-        unscheduled = [j for j in jobs_list if not j.get("date") and j.get("job_tag") == "subscription"]
+        unscheduled = [j for j in jobs_list if not j.get("date") and is_subscription_tag(j.get("job_tag"))]
         pkgs = {}
         for uj in unscheduled:
             pid = uj["group_id"].split("_")[0]
@@ -904,6 +995,10 @@ with tab_analiz:
     m3.metric("Ciro", f"{agg['ciro']:,.0f} ₺")
     m4.metric("Maliyet", f"{agg['maliyet']:,.0f} ₺")
 
+    st.markdown("#### 🥧 Ciro nereden geliyor?")
+    st.caption("Ay sonu planı: seçili ayın müşteri cirosu etiketlere göre.")
+    render_ciro_pie(summaries, title=f"{calendar.month_name[sm]} {sy} ciro dağılımı")
+
     if sec_cid is None and summaries:
         st.markdown("**En kârlı müşteriler (bu ay)**")
         for r in customer_ranking_from_summaries(summaries)[:8]:
@@ -917,10 +1012,10 @@ with tab_analiz:
     else:
         st.markdown("**Ziyaretler**")
         for si, s in enumerate(summaries[:25]):
-            tag_ico = "🔄" if s["job_tag"] == "subscription" else "🔹"
+            tag_ico = job_tag_icon(s["job_tag"])
             musteri_txt = f"{s['customer']} · " if sec_cid is None else ""
             with st.expander(
-                f"{tag_ico} {musteri_txt}{s['date']}{s['sub_label']} · 💹 {s['kar']:,.0f} ₺",
+                f"{tag_ico} {musteri_txt}{s['date']}{s['sub_label']} · {s['tag_label']} · 💹 {s['kar']:,.0f} ₺",
                 expanded=False,
             ):
                 st.caption(f"👷 {s['kisi']} kişi — {s['kadro_badge']}")
