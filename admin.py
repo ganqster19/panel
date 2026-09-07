@@ -24,7 +24,7 @@ from vardiya.db import (
     build_visit_summaries, aggregate_visit_summaries, customer_ranking_from_summaries,
     db_diagnostics, JOB_TAG_ADD_LABELS, job_tag_from_label, job_tag_label,
     job_tag_icon, job_tag_css, job_tag_option_index, is_subscription_tag,
-    job_tag_css_block, render_ciro_pie,
+    job_tag_css_block, render_ciro_pie, render_name_assignment,
 )
 
 # --- SAYFA AYARLARI ---
@@ -102,7 +102,7 @@ class Is:
 st.markdown("""
 <style>
 """ + job_tag_css_block() + """
-    .job-subs, .job-once, .job-hotel, .job-insaat { padding: 1px 4px; border-radius: 4px; font-size: 10px; display: block; margin-bottom: 2px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .job-subs, .job-once, .job-hotel, .job-anahtar { padding: 1px 4px; border-radius: 4px; font-size: 10px; display: block; margin-bottom: 2px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .net-profit { color: #008f39; font-weight: bold; font-size: 12px; text-align: right; margin-top: 2px; border-top: 1px solid #eee; }
     .stButton button { width: 100%; border-radius: 5px; }
     .report-box { background-color: #f0f2f6; padding: 10px; border-radius: 5px; margin-bottom: 10px; color: #000; }
@@ -899,48 +899,9 @@ with tabs[1]:
                             st.rerun()
 
                     st.divider()
-                    st.markdown("**Personel atamaları**")
-                    for ri, row in enumerate(group):
-                        ico = "🎓" if row['job_type'] == 'student' else "👔"
-                        slot_name = row.get('staff_name') or f"{ico} #{ri + 1}"
-                        aname = "❓"
-                        if row.get('assigned_student_id'):
-                            found = [s['name'] for s in db.get('students', []) if s['id'] == row['assigned_student_id']]
-                            if found:
-                                aname = found[0]
-                        elif row.get('assigned_pro_id'):
-                            found = [p['name'] for p in db.get('pros', []) if p['id'] == row['assigned_pro_id']]
-                            if found:
-                                aname = found[0]
-                        st.caption(f"**{slot_name}** → Atanan: {aname}")
-
-                        with st.popover(f"🎯 Ata: {slot_name}"):
-                            ready_ids = [
-                                int(a['person_id']) for a in db.get('availability', [])
-                                if a['date'] == sd and a['status'] == 'available'
-                            ]
-                            if row['job_type'] == 'student':
-                                musait = [s for s in db.get('students', []) if s['id'] in ready_ids] or db.get('students', [])
-                                sl = {s['name']: s['id'] for s in musait}
-                                sel = st.selectbox("Öğrenci", list(sl.keys()), key=f"s_{row['id']}_{gi}_{ri}")
-                                if st.button("Ata", key=f"ba_{row['id']}_{gi}_{ri}"):
-                                    add_to_queue(
-                                        f"Atama: {sel}",
-                                        "UPDATE jobs SET assigned_student_id=%s WHERE id=%s",
-                                        (sl[sel], row['id']),
-                                    )
-                                    st.rerun()
-                            else:
-                                musait = [p for p in db.get('pros', []) if p['id'] in ready_ids] or db.get('pros', [])
-                                pl = {p['name']: p['id'] for p in musait}
-                                sel = st.selectbox("Profesyonel", list(pl.keys()), key=f"p_{row['id']}_{gi}_{ri}")
-                                if st.button("Ata", key=f"bp_{row['id']}_{gi}_{ri}"):
-                                    add_to_queue(
-                                        f"Atama: {sel}",
-                                        "UPDATE jobs SET assigned_pro_id=%s WHERE id=%s",
-                                        (pl[sel], row['id']),
-                                    )
-                                    st.rerun()
+                    render_name_assignment(
+                        group, f"adm_{gkey}_{gi}", sd, db, add_to_queue, use_expander=False,
+                    )
 
                     new_job_note = st.text_input(
                         "İşe Özel Not", value=j.get('job_note') or '', key=f"jnote_{gkey}_{gi}",
@@ -1326,7 +1287,7 @@ with tabs[5]:
     c5.metric("🎓 Öğrenci Ziyaretleri", f"{ogrenci_is_sayisi} Adet", f"👔 Pro: {pro_is_sayisi}")
 
     st.markdown("#### 🥧 Ciro nereden geliyor?")
-    st.caption("Seçili ayın ziyaret cirosu etiketlere göre (otel, inşaat, tek sefer, abonelik).")
+    st.caption("Seçili ayın ziyaret cirosu etiketlere göre (otel, anahtar teslim, tek sefer, abonelik).")
     render_ciro_pie(
         [
             {"job_tag": visit_group_label(g).get("job_tag"), "ciro": visit_customer_revenue(g)}

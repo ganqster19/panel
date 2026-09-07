@@ -21,7 +21,7 @@ from vardiya.db import (
     aggregate_visit_summaries, customer_ranking_from_summaries,
     JOB_TAG_ADD_LABELS, job_tag_from_label, job_tag_label, job_tag_icon,
     job_tag_css, job_tag_option_index, is_subscription_tag, job_tag_css_block,
-    resolve_row_staff_name, render_ciro_pie,
+    resolve_row_staff_name, render_ciro_pie, render_name_assignment,
 )
 from vardiya.auth import require_auth
 
@@ -81,7 +81,7 @@ st.markdown("""
 
     /* Sabit açık renkli kutular — metin rengi her zaman koyu */
 """ + job_tag_css_block() + """
-    .job-subs, .job-once, .job-hotel, .job-insaat {
+    .job-subs, .job-once, .job-hotel, .job-anahtar {
         padding: 8px 10px; border-radius: 8px; font-size: 14px; display: block;
         margin-bottom: 6px; font-weight: 600; line-height: 1.3;
     }
@@ -484,84 +484,11 @@ def render_visit_edit_form(group, i, customers, session_label=""):
 
 
 def render_personnel_assignment(group, key_prefix, day_str):
-    """Slot bazında öğrenci/pro veya servis personeli ata."""
+    """Slot bazında isimle personel ata (listeden seç veya elle yaz)."""
     data = st.session_state.get("db_data") or {}
-    students = data.get("students") or []
-    pros = data.get("pros") or []
-    service = data.get("service_personnel") or []
-    availability = data.get("availability") or []
-    if not students and not pros and not service:
-        st.caption("Personel listesi boş — 👷 Personel veya admin Kişiler sekmesinden ekleyin.")
-        return
-
-    ready_ids = [
-        int(a["person_id"]) for a in availability
-        if a.get("date") == day_str and a.get("status") == "available"
-        and str(a.get("person_id", "")).lstrip("-").isdigit()
-    ]
-
-    with st.expander("🎯 Personel ata"):
-        for ri, row in enumerate(group):
-            rid = row.get("id")
-            ico = "🎓" if row.get("job_type") == "student" else "👔"
-            slot_name = row.get("staff_name") or f"{ico} #{ri + 1}"
-            aname = "atanmadı"
-            if row.get("assigned_student_id"):
-                found = [s["name"] for s in students if s["id"] == row["assigned_student_id"]]
-                if found:
-                    aname = found[0]
-            elif row.get("assigned_pro_id"):
-                found = [p["name"] for p in pros if p["id"] == row["assigned_pro_id"]]
-                if found:
-                    aname = found[0]
-            elif row.get("staff_name"):
-                aname = row["staff_name"]
-            st.caption(f"**{slot_name}** → {aname}")
-            if rid is None or str(rid).startswith("tmp_"):
-                st.caption("Kaydettikten sonra atama yapılabilir.")
-                continue
-
-            if row.get("job_type") == "student" and students:
-                musait = [s for s in students if s["id"] in ready_ids] or students
-                sl = {s["name"]: s["id"] for s in musait}
-                sel = st.selectbox("Öğrenci", list(sl.keys()), key=f"as_s_{key_prefix}_{rid}_{ri}")
-                if st.button("Ata", key=f"as_sb_{key_prefix}_{rid}_{ri}", use_container_width=True):
-                    add_to_queue(
-                        f"Atama: {sel}",
-                        "UPDATE jobs SET assigned_student_id=%s, assigned_pro_id=NULL, staff_name=%s WHERE id=%s",
-                        (sl[sel], sel, rid),
-                    )
-                    row["assigned_student_id"] = sl[sel]
-                    row["assigned_pro_id"] = None
-                    row["staff_name"] = sel
-                    st.rerun()
-            elif row.get("job_type") != "student" and pros:
-                musait = [p for p in pros if p["id"] in ready_ids] or pros
-                pl = {p["name"]: p["id"] for p in musait}
-                sel = st.selectbox("Profesyonel", list(pl.keys()), key=f"as_p_{key_prefix}_{rid}_{ri}")
-                if st.button("Ata", key=f"as_pb_{key_prefix}_{rid}_{ri}", use_container_width=True):
-                    add_to_queue(
-                        f"Atama: {sel}",
-                        "UPDATE jobs SET assigned_pro_id=%s, assigned_student_id=NULL, staff_name=%s WHERE id=%s",
-                        (pl[sel], sel, rid),
-                    )
-                    row["assigned_pro_id"] = pl[sel]
-                    row["assigned_student_id"] = None
-                    row["staff_name"] = sel
-                    st.rerun()
-            elif service:
-                sl = {s["name"]: s for s in service}
-                sel = st.selectbox("Servis personeli", list(sl.keys()), key=f"as_sv_{key_prefix}_{rid}_{ri}")
-                if st.button("Ata", key=f"as_svb_{key_prefix}_{rid}_{ri}", use_container_width=True):
-                    person = sl[sel]
-                    add_to_queue(
-                        f"Atama: {sel}",
-                        "UPDATE jobs SET staff_name=%s, staff_phone=%s WHERE id=%s",
-                        (person.get("name"), person.get("phone") or None, rid),
-                    )
-                    row["staff_name"] = person.get("name")
-                    row["staff_phone"] = person.get("phone")
-                    st.rerun()
+    if not (data.get("students") or data.get("pros") or data.get("service_personnel")):
+        st.caption("Personel listesi boş — aşağıdan ismi elle yazabilirsiniz.")
+    render_name_assignment(group, key_prefix, day_str, data, add_to_queue)
 
 
 def sync_month_from_date(ds):

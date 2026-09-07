@@ -52,8 +52,8 @@ JOB_TAGS = {
         "label": "Otel", "icon": "🏨", "css": "job-hotel",
         "color": "#6a1b9a", "bg": "#f3e5f5", "border": "#ce93d8",
     },
-    "construction": {
-        "label": "İnşaat temizliği", "icon": "🏗️", "css": "job-insaat",
+    "turnkey": {
+        "label": "Anahtar teslim", "icon": "🔑", "css": "job-anahtar",
         "color": "#2e7d32", "bg": "#e8f5e9", "border": "#81c784",
     },
     "subscription": {
@@ -61,17 +61,20 @@ JOB_TAGS = {
         "color": "#e65100", "bg": "#fff3e0", "border": "#ffcc80",
     },
 }
-JOB_TAG_ORDER = ("one_time", "hotel", "construction", "subscription")
+JOB_TAG_ORDER = ("one_time", "hotel", "turnkey", "subscription")
 JOB_TAG_ADD_LABELS = (
     "Tek seferlik",
     "Otel",
-    "İnşaat temizliği",
+    "Anahtar teslim",
     "Abonelik (kota)",
 )
+# Eski kayıtlar için karşılıklar (DB'de kalmış etiketler bozulmasın)
+JOB_TAG_ALIASES = {"construction": "turnkey", "insaat": "turnkey"}
 
 
 def normalize_job_tag(tag) -> str:
     t = (tag or "").strip()
+    t = JOB_TAG_ALIASES.get(t, t)
     return t if t in JOB_TAGS else "one_time"
 
 
@@ -101,9 +104,18 @@ def job_tag_from_label(label) -> str:
         return "subscription"
     if t.startswith("otel"):
         return "hotel"
-    if t.startswith("inşaat") or t.startswith("insaat"):
-        return "construction"
+    if t.startswith("anahtar") or t.startswith("inşaat") or t.startswith("insaat"):
+        return "turnkey"
     return "one_time"
+
+
+def job_tag_db_values(tag) -> list:
+    """Etiketin DB'de bulunabilecek tüm yazımları (eski kayıtlar dahil)."""
+    key = normalize_job_tag(tag)
+    vals = [key] + [old for old, new in JOB_TAG_ALIASES.items() if new == key]
+    if key == "one_time":
+        vals.append("")
+    return vals
 
 
 def job_tag_option_index(tag) -> int:
@@ -303,8 +315,9 @@ def visit_delete_action(group):
             return ("DELETE FROM jobs WHERE id = ANY(%s)", (ids,))
     if date and cid is not None:
         return (
-            "DELETE FROM jobs WHERE customer_id=%s AND COALESCE(date, '')=%s AND job_tag=%s",
-            (cid, date, tag),
+            "DELETE FROM jobs WHERE customer_id=%s AND COALESCE(date, '')=%s "
+            "AND COALESCE(job_tag, '') = ANY(%s)",
+            (cid, date, job_tag_db_values(tag)),
         )
     if gid:
         return (
@@ -525,6 +538,169 @@ def resolve_row_staff_name(row, pros_by_id=None, students_by_id=None):
     return TIP_LABELS.get(tip, tip), tip
 
 
+PERSON_KIND_ICONS = {"pro": "👔", "student": "🎓", "service": "🧹"}
+MANUAL_NAME_OPTION = "✍️ Elle isim yaz"
+EMPTY_NAME_OPTION = "— Atanmadı —"
+
+
+def personnel_name_pool(data, day_str=None):
+    """Profesyonel + öğrenci + servis personelini tek isim listesinde topla."""
+    availability = data.get("availability") or []
+    ready = {
+        int(a["person_id"]) for a in availability
+        if (not day_str or a.get("date") == day_str)
+        and a.get("status") == "available"
+        and str(a.get("person_id", "")).lstrip("-").isdigit()
+    }
+
+    pool, seen = [], set()
+    for kind, rows in (("pro", data.get("pros")), ("student", data.get("students"))):
+        for p in rows or []:
+            name = (p.get("name") or "").strip()
+            if not name:
+                continue
+            musait = p.get("id") in ready
+            pool.append({
+                "name": name, "kind": kind, "id": p.get("id"),
+                "phone": p.get("phone"), "available": musait,
+                "label": f"{PERSON_KIND_ICONS[kind]} {name}" + (" ✅" if musait else ""),
+            })
+            seen.add(name.casefold())
+
+    for s in data.get("service_personnel") or []:
+        name = (s.get("name") or "").strip()
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        pool.append({
+            "name": name, "kind": "service", "id": None,
+            "phone": s.get("phone"), "available": False,
+            "label": f"{PERSON_KIND_ICONS['service']} {name}",
+        })
+
+    pool.sort(key=lambda p: (not p["available"], p["kind"] != "pro", p["name"].casefold()))
+
+    # Aynı isim iki listede varsa seçim kutusunda ayırt edilebilsin
+    used = set()
+    for p in pool:
+        base, lbl, n = p["label"], p["label"], 2
+        while lbl in used:
+            lbl = f"{base} ({n})"
+            n += 1
+        used.add(lbl)
+        p["label"] = lbl
+    return pool
+
+
+def personnel_assign_sql(person, row_id):
+    """Seçilen kişiyi işe bağlayan UPDATE (isim her zaman yazılır)."""
+    name = (person.get("name") or "").strip()
+    phone = person.get("phone") or None
+    kind = person.get("kind")
+    if kind == "pro" and person.get("id") is not None:
+        return (
+            "UPDATE jobs SET assigned_pro_id=%s, assigned_student_id=NULL, "
+            "staff_name=%s, staff_phone=%s WHERE id=%s",
+            (person["id"], name, phone, row_id),
+        )
+    if kind == "student" and person.get("id") is not None:
+        return (
+            "UPDATE jobs SET assigned_student_id=%s, assigned_pro_id=NULL, "
+            "staff_name=%s, staff_phone=%s WHERE id=%s",
+            (person["id"], name, phone, row_id),
+        )
+    return (
+        "UPDATE jobs SET assigned_pro_id=NULL, assigned_student_id=NULL, "
+        "staff_name=%s, staff_phone=%s WHERE id=%s",
+        (name, phone, row_id),
+    )
+
+
+def personnel_clear_sql(row_id):
+    return (
+        "UPDATE jobs SET assigned_pro_id=NULL, assigned_student_id=NULL, "
+        "staff_name=NULL, staff_phone=NULL WHERE id=%s",
+        (row_id,),
+    )
+
+
+def apply_person_to_row(row, person):
+    """Kuyruk beklemeden ekranda güncel isim görünsün."""
+    if person is None:
+        row["assigned_pro_id"] = None
+        row["assigned_student_id"] = None
+        row["staff_name"] = None
+        row["staff_phone"] = None
+        return
+    row["assigned_pro_id"] = person["id"] if person.get("kind") == "pro" else None
+    row["assigned_student_id"] = person["id"] if person.get("kind") == "student" else None
+    row["staff_name"] = person.get("name")
+    row["staff_phone"] = person.get("phone")
+
+
+def render_name_assignment(group, key_prefix, day_str, data, queue_fn, use_expander=True):
+    """Her personel slotuna isimle atama yap (listeden seç veya elle yaz)."""
+    pool = personnel_name_pool(data, day_str)
+    pros_by_id = {p["id"]: p for p in (data.get("pros") or [])}
+    students_by_id = {s["id"]: s for s in (data.get("students") or [])}
+    by_label = {p["label"]: p for p in pool}
+    options = [EMPTY_NAME_OPTION] + list(by_label.keys()) + [MANUAL_NAME_OPTION]
+
+    box = st.expander("🎯 Personel ata") if use_expander else st.container()
+    with box:
+        if not use_expander:
+            st.markdown("**🎯 Personel ata (isimle)**")
+        for ri, row in enumerate(group):
+            rid = row.get("id")
+            ico = PERSON_KIND_ICONS.get(row.get("job_type"), "👤")
+            mevcut, _ = resolve_row_staff_name(row, pros_by_id, students_by_id)
+            atanmis = bool(
+                row.get("staff_name") or row.get("assigned_pro_id") is not None
+                or row.get("assigned_student_id") is not None
+            )
+            st.caption(f"**{ico} #{ri + 1}** → {mevcut if atanmis else 'atanmadı'}")
+
+            if rid is None or str(rid).startswith("tmp_"):
+                st.caption("Kaydettikten sonra atama yapılabilir.")
+                continue
+
+            k = f"{key_prefix}_{rid}_{ri}"
+            idx = 0
+            for pi, p in enumerate(pool):
+                if p["name"].casefold() == (row.get("staff_name") or "").casefold():
+                    idx = pi + 1
+                    break
+            sec = st.selectbox("Personel", options, index=idx, key=f"pa_sel_{k}")
+
+            person = None
+            if sec == MANUAL_NAME_OPTION:
+                mc1, mc2 = st.columns(2)
+                el_ad = mc1.text_input("İsim", value="", key=f"pa_name_{k}")
+                el_tel = mc2.text_input("Telefon", value="", key=f"pa_tel_{k}")
+                if el_ad.strip():
+                    person = {
+                        "name": el_ad.strip(), "kind": "manual",
+                        "id": None, "phone": el_tel.strip() or None,
+                    }
+            elif sec != EMPTY_NAME_OPTION:
+                person = by_label.get(sec)
+
+            b1, b2 = st.columns([2, 1])
+            if b1.button("✅ Ata", key=f"pa_ok_{k}", use_container_width=True):
+                if person is None:
+                    st.warning("Önce bir personel seçin ya da isim yazın.")
+                else:
+                    q, params = personnel_assign_sql(person, rid)
+                    queue_fn(f"Atama: {person['name']}", q, params)
+                    apply_person_to_row(row, person)
+                    st.rerun()
+            if b2.button("🧹 Kaldır", key=f"pa_clr_{k}", use_container_width=True):
+                q, params = personnel_clear_sql(rid)
+                queue_fn("Atama kaldırıldı", q, params)
+                apply_person_to_row(row, None)
+                st.rerun()
+
+
 def format_kadro_isimleri(kadro) -> str:
     """Kadrodaki isimleri okunabilir metne çevir."""
     if not kadro:
@@ -554,7 +730,7 @@ def visit_summary(group, meta=None, pros=None, students=None):
 
     revenue = visit_customer_revenue(group)
     cost = visit_worker_cost(group)
-    tag = j.get("job_tag") or "one_time"
+    tag = normalize_job_tag(j.get("job_tag"))
     has_charge = any(float(r.get("price_customer") or 0) > 0 for r in group)
     if has_charge:
         tahsil = all(
