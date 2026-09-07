@@ -26,8 +26,10 @@ from vardiya.db import (
 from vardiya.auth import require_auth
 
 try:
-    from vardiya.db import render_name_assignment
+    from vardiya.db import render_name_assignment, DB_MODULE_VERSION
 except ImportError:  # sunucuda eski vardiya/db.py varsa panel tamamen çökmesin
+    DB_MODULE_VERSION = "eski sürüm — Reboot gerekli"
+
     def render_name_assignment(*_a, **_k):
         st.warning("Personel atama modülü eski — uygulamayı Reboot edin.")
 
@@ -577,7 +579,10 @@ with b3:
         commit_queue()
 st.markdown("</div>", unsafe_allow_html=True)
 
-st.caption(f"📊 {len(jobs_list)} iş · {len(personnel)} personel · 📅 {sd_global} · son 1 hafta")
+st.caption(
+    f"📊 {len(jobs_list)} iş · {len(personnel)} personel · 📅 {sd_global} · son 1 hafta"
+    f" · 🔖 {DB_MODULE_VERSION}"
+)
 
 st.title("📱 Vardiya")
 tab_ekle, tab_takvim, tab_analiz, tab_musteri, tab_personel, tab_gider = st.tabs(

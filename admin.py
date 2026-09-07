@@ -28,8 +28,10 @@ from vardiya.db import (
 )
 
 try:
-    from vardiya.db import render_name_assignment
+    from vardiya.db import render_name_assignment, DB_MODULE_VERSION
 except ImportError:  # sunucuda eski vardiya/db.py varsa panel tamamen çökmesin
+    DB_MODULE_VERSION = "eski sürüm — Reboot gerekli"
+
     def render_name_assignment(*_a, **_k):
         st.warning("Personel atama modülü eski — uygulamayı Reboot edin.")
 
@@ -537,6 +539,7 @@ with st.sidebar:
     </div>""", unsafe_allow_html=True)
 
     st.caption(f"🗄️ DB: {len(jobs_list)} iş · {len(db.get('customers', []))} müşteri")
+    st.caption(f"🔖 Kod sürümü: {DB_MODULE_VERSION}")
 
     load_errors = db.get("_load_errors") or {}
     db_diag = db.get("_db_diag") or {}
