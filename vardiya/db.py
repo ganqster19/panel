@@ -259,7 +259,7 @@ def render_ciro_pie(summaries, title="Ay sonu ciro kaynağı"):
         ])
         st.altair_chart(
             alt.layer(ic, dis).properties(title=title, height=340),
-            use_container_width=True,
+            width="stretch",
         )
     except Exception:
         st.caption("Grafik çizilemedi — dağılım aşağıda listelenmiştir.")
@@ -770,7 +770,7 @@ def render_name_assignment(group, key_prefix, day_str, data, queue_fn, use_expan
                 person = by_label.get(sec)
 
             b1, b2 = st.columns([2, 1])
-            if b1.button("✅ Ata", key=f"pa_ok_{k}", use_container_width=True):
+            if b1.button("✅ Ata", key=f"pa_ok_{k}", width="stretch"):
                 if person is None:
                     st.warning("Önce bir personel seçin ya da isim yazın.")
                 else:
@@ -778,7 +778,7 @@ def render_name_assignment(group, key_prefix, day_str, data, queue_fn, use_expan
                     queue_fn(f"Atama: {person['name']}", q, params)
                     apply_person_to_row(row, person)
                     st.rerun()
-            if b2.button("🧹 Kaldır", key=f"pa_clr_{k}", use_container_width=True):
+            if b2.button("🧹 Kaldır", key=f"pa_clr_{k}", width="stretch"):
                 q, params = personnel_clear_sql(rid)
                 queue_fn("Atama kaldırıldı", q, params)
                 apply_person_to_row(row, None)

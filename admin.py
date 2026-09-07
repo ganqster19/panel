@@ -650,7 +650,7 @@ with tabs[0]:
         oc3.metric("💰 Toplam Gelir", f"{toplam_gelir:,.0f} ₺")
         oc4.metric("💹 Net Kâr (tahmini)", f"{net:,.0f} ₺")
 
-        if st.button("✅ Sepete Ekle", type="primary", use_container_width=True):
+        if st.button("✅ Sepete Ekle", type="primary", width="stretch"):
             if sc == "-":
                 st.warning("Lütfen bir müşteri seçin.")
             elif personel_sayisi < 1:
@@ -686,7 +686,7 @@ with tabs[0]:
         if not st.session_state.draft_jobs:
             st.caption("Sepette henüz iş yok.")
         else:
-            if st.button("💾 KUYRUĞA EKLE (KAYDETMEK İÇİN)", type="primary", use_container_width=True):
+            if st.button("💾 KUYRUĞA EKLE (KAYDETMEK İÇİN)", type="primary", width="stretch"):
                 rows = []
                 for is_obj in st.session_state.draft_jobs:
                     for gid, ds, cid, jtype, worker_price, cust_cut, tag, prepaid in is_obj.db_satirlarina_donustur():
@@ -718,7 +718,7 @@ with tabs[0]:
                         f"Personel: {personel_listesi_ozet(is_obj.personeller)}  ·  "
                         f"Maliyet: {is_obj.toplam_personel_maliyeti:,.0f} ₺"
                     )
-                    if st.button("🗑️ Sepetten Sil", key=f"del_draft_{i}", use_container_width=True):
+                    if st.button("🗑️ Sepetten Sil", key=f"del_draft_{i}", width="stretch"):
                         st.session_state.draft_jobs.pop(i)
                         st.rerun()
 
@@ -762,7 +762,7 @@ with tabs[1]:
                         ds = f"{d:02d}.{ms}"
                         with st.container(border=True):
                             gun_basligi = f"{d} 👥{day_map[ds]['toplam_kisi']}" if ds in day_map else f"{d}"
-                            if st.button(gun_basligi, key=f"cal_{d}", use_container_width=True): st.session_state.sel_date=ds
+                            if st.button(gun_basligi, key=f"cal_{d}", width="stretch"): st.session_state.sel_date=ds
                             if ds in day_map:
                                 for name, data in list(day_map[ds]['jobs'].items())[:3]:
                                     css = job_tag_css(data['tag'])
@@ -954,7 +954,7 @@ with tabs[1]:
                 tot = pdata['total_quota']
                 with st.container(border=True):
                     st.markdown(f"<div class='quota-box'><b><span style='color:black;'>{pdata['name']}</span></b><br><span style='color:black;'>Kalan Hak: <b>{rem}/{tot}</b></span></div>", unsafe_allow_html=True)
-                    if st.button(f"📌 {sd} Tarihine Ata", key=f"ass_{pid}", use_container_width=True):
+                    if st.button(f"📌 {sd} Tarihine Ata", key=f"ass_{pid}", width="stretch"):
                         def _kota_sira(gid):
                             parca = gid.split('_')
                             return int(parca[1]) if len(parca) > 1 and parca[1].isdigit() else 0
@@ -1162,7 +1162,7 @@ with tabs[4]:
         ])
         st.dataframe(
             rank_df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Ciro (₺)": st.column_config.NumberColumn(format="%.0f"),
@@ -1246,7 +1246,7 @@ with tabs[5]:
 
     ac1, ac2 = st.columns([3, 1])
     with ac2:
-        if st.button("🔄 Otomatik Değerlere Sıfırla", key=f"analiz_reset_{month_key}", use_container_width=True):
+        if st.button("🔄 Otomatik Değerlere Sıfırla", key=f"analiz_reset_{month_key}", width="stretch"):
             st.session_state[maas_key] = 0.0
             st.session_state[saha_key] = otomatik['saha']
             st.session_state[diger_key] = 0.0
@@ -1365,7 +1365,7 @@ with tabs[6]:
             col_config = {"Personel_ID": None, "Personel": st.column_config.TextColumn("Personel", disabled=True)}
             for d in day_cols: col_config[d] = st.column_config.SelectboxColumn(d, options=["", "✅", "❌", "⚠️"], width="small")
             
-            edited_df = st.data_editor(df_status, column_config=col_config, hide_index=True, use_container_width=True, key="ed_status")
+            edited_df = st.data_editor(df_status, column_config=col_config, hide_index=True, width="stretch", key="ed_status")
             if st.button("💾 Yoklamaları Kaydet"):
                 for idx, row in edited_df.iterrows():
                     pid = row['Personel_ID']
@@ -1394,7 +1394,7 @@ with tabs[6]:
             col_config_av = {"Personel_ID": None, "Personel": st.column_config.TextColumn("Personel", disabled=True)}
             for d in day_cols: col_config_av[d] = st.column_config.NumberColumn(d, format="%d ₺", width="small")
             
-            edited_av = st.data_editor(df_avans, column_config=col_config_av, hide_index=True, use_container_width=True, key="ed_av")
+            edited_av = st.data_editor(df_avans, column_config=col_config_av, hide_index=True, width="stretch", key="ed_av")
             if st.button("💾 Avansları Kaydet"):
                 for idx, row in edited_av.iterrows():
                     pid = row['Personel_ID']
@@ -1432,7 +1432,7 @@ with tabs[6]:
             }
             for d in day_cols: col_config_av[d] = st.column_config.SelectboxColumn(d, options=["", "✅ Müsait", "❌ Meşgul"], width="small")
             
-            edited_avail = st.data_editor(df_avail, column_config=col_config_av, hide_index=True, use_container_width=True, key="ed_avail_grid")
+            edited_avail = st.data_editor(df_avail, column_config=col_config_av, hide_index=True, width="stretch", key="ed_avail_grid")
             
             if st.button("💾 Müsaitlik Durumlarını Kaydet"):
                 for idx, row in edited_avail.iterrows():

@@ -370,11 +370,11 @@ def render_kota_session_controls(sg, sg_gid, key_prefix, sub_meta, default_date_
             label_visibility="collapsed",
         )
     with c2:
-        if st.button("📅 Taşı", key=f"kota_move_{key_prefix}", use_container_width=True):
+        if st.button("📅 Taşı", key=f"kota_move_{key_prefix}", width="stretch"):
             move_kota_session(sg_gid, sg, format_tr_date(new_d))
             st.rerun()
     with c3:
-        if st.button("🔙 Havuz", key=f"kota_pool_{key_prefix}", use_container_width=True):
+        if st.button("🔙 Havuz", key=f"kota_pool_{key_prefix}", width="stretch"):
             return_kota_to_pool(sg_gid, sg)
             st.rerun()
 
@@ -441,7 +441,7 @@ def render_visit_edit_form(group, i, customers, session_label=""):
             value=float(ucret["student"]), key=f"ed_stu_u_{jid}_{i}",
         )
 
-        if st.button("Güncelle", key=f"ed_btn_{jid}_{i}", type="primary", use_container_width=True):
+        if st.button("Güncelle", key=f"ed_btn_{jid}_{i}", type="primary", width="stretch"):
             if int(e_pro_n) + int(e_stu_n) < 1:
                 st.warning("En az 1 personel girin.")
             else:
@@ -564,7 +564,7 @@ sd_global = st.session_state.sel_date
 st.markdown('<div class="mobil-bar">', unsafe_allow_html=True)
 b1, b2, b3 = st.columns([1, 2, 1])
 with b1:
-    if st.button("🔄", help="Yenile", use_container_width=True):
+    if st.button("🔄", help="Yenile", width="stretch"):
         refresh_data()
         st.rerun()
 with b2:
@@ -573,7 +573,7 @@ with b2:
     else:
         st.success("✓ Senkron", icon="✅")
 with b3:
-    if st.button("💾 KAYDET", type="primary", disabled=q_len == 0, use_container_width=True):
+    if st.button("💾 KAYDET", type="primary", disabled=q_len == 0, width="stretch"):
         commit_queue()
 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -621,7 +621,7 @@ with tab_ekle:
     ogrenci_ucret = pc4.number_input("Öğrenci yevmiye (₺)", min_value=0.0, step=50.0, key="basit_stu_u")
     st.caption("Örn: 2 Profesyonel + 1 Öğrenci — aynı ziyarette gruplanır.")
 
-    if st.button("✅ Sepete ekle", type="primary", use_container_width=True):
+    if st.button("✅ Sepete ekle", type="primary", width="stretch"):
         if sc == "— Seçin —":
             st.warning("Müşteri seçin.")
         elif int(pro_sayi) + int(ogrenci_sayi) < 1:
@@ -666,10 +666,10 @@ with tab_ekle:
                 f"{is_obj.ziyaret_sayisi} gün/kota · 👷 {p_ozet}\n"
                 f"📞 {tel} (müşteri profili)"
             )
-            if st.button("Sepetten kaldır", key=f"basit_draft_del_{i}", use_container_width=True):
+            if st.button("Sepetten kaldır", key=f"basit_draft_del_{i}", width="stretch"):
                 st.session_state.draft_jobs.pop(i)
                 st.rerun()
-        if st.button("💾 Kuyruğa ekle", type="primary", use_container_width=True, key="basit_kuyruk"):
+        if st.button("💾 Kuyruğa ekle", type="primary", width="stretch", key="basit_kuyruk"):
             rows = []
             for is_obj in st.session_state.draft_jobs:
                 for row in is_obj.db_satirlarina_donustur():
@@ -718,15 +718,15 @@ with tab_takvim:
     st.markdown('<div class="nav-day-btn">', unsafe_allow_html=True)
     nav1, nav2, nav3 = st.columns(3)
     with nav1:
-        if st.button("◀ Dün", key="basit_dun", use_container_width=True):
+        if st.button("◀ Dün", key="basit_dun", width="stretch"):
             st.session_state._day_nav = "prev"
             st.rerun()
     with nav2:
-        if st.button("📍 Bugün", key="basit_bugun_nav", use_container_width=True):
+        if st.button("📍 Bugün", key="basit_bugun_nav", width="stretch"):
             st.session_state._day_nav = "today"
             st.rerun()
     with nav3:
-        if st.button("Yarın ▶", key="basit_yarin", use_container_width=True):
+        if st.button("Yarın ▶", key="basit_yarin", width="stretch"):
             st.session_state._day_nav = "next"
             st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
@@ -791,7 +791,7 @@ with tab_takvim:
             with act2:
                 render_action_link("🗺️ Harita", loc, new_tab=True)
             with act3:
-                if st.button("🗑️", key=f"basit_del_{jid}_{i}", use_container_width=True, help="Sil"):
+                if st.button("🗑️", key=f"basit_del_{jid}_{i}", width="stretch", help="Sil"):
                     del_action = visit_delete_action(group)
                     if del_action:
                         add_to_queue("Silme", del_action[0], del_action[1])
@@ -808,13 +808,13 @@ with tab_takvim:
     # --- Alt: ay takvimi & bekleyen kotalar ---
     with st.expander("📅 Ay takvimi", expanded=False):
         nav_a, nav_b, nav_c = st.columns(3)
-        if nav_a.button("◀ Önceki ay", key="basit_prev_m", use_container_width=True):
+        if nav_a.button("◀ Önceki ay", key="basit_prev_m", width="stretch"):
             st.session_state._month_nav = "prev"
             st.rerun()
-        if nav_b.button("📍 Bugün", key="basit_bugun_cal", use_container_width=True):
+        if nav_b.button("📍 Bugün", key="basit_bugun_cal", width="stretch"):
             st.session_state._month_nav = "today"
             st.rerun()
-        if nav_c.button("Sonraki ay ▶", key="basit_next_m", use_container_width=True):
+        if nav_c.button("Sonraki ay ▶", key="basit_next_m", width="stretch"):
             st.session_state._month_nav = "next"
             st.rerun()
 
@@ -827,7 +827,7 @@ with tab_takvim:
                 with cols[col_i]:
                     lbl = f"{day} · 👥{day_map[ds_btn]['kisi']}" if ds_btn in day_map else str(day)
                     btn_type = "primary" if ds_btn == sd else "secondary"
-                    if st.button(lbl, key=f"basit_day_{day}", type=btn_type, use_container_width=True):
+                    if st.button(lbl, key=f"basit_day_{day}", type=btn_type, width="stretch"):
                         st.session_state.sel_date = ds_btn
                         st.rerun()
 
@@ -872,27 +872,27 @@ with tab_takvim:
                             label_visibility="collapsed",
                         )
                     with pc2:
-                        if st.button("📌 Yerleştir", key=f"pool_place_{pid}_{gid}", use_container_width=True):
+                        if st.button("📌 Yerleştir", key=f"pool_place_{pid}_{gid}", width="stretch"):
                             move_kota_session(gid, rows, format_tr_date(pool_date))
                             st.rerun()
 
 # ========== ANALİZ ==========
 with tab_analiz:
     an1, an2, an3 = st.columns(3)
-    if an1.button("◀ Önceki ay", key="analiz_prev_m", use_container_width=True):
+    if an1.button("◀ Önceki ay", key="analiz_prev_m", width="stretch"):
         st.session_state._month_nav = "prev"
         st.rerun()
-    if an2.button("📍 Bugün", key="analiz_today_m", use_container_width=True):
+    if an2.button("📍 Bugün", key="analiz_today_m", width="stretch"):
         st.session_state._month_nav = "today"
         st.rerun()
-    if an3.button("Sonraki ay ▶", key="analiz_next_m", use_container_width=True):
+    if an3.button("Sonraki ay ▶", key="analiz_next_m", width="stretch"):
         st.session_state._month_nav = "next"
         st.rerun()
 
     st.markdown(f"### 📊 {calendar.month_name[sm]} {sy}")
     st.caption("Tam geçmiş analizi — mobil takvimden bağımsız.")
 
-    if st.button("🔄 Analizi yenile", key="mobil_analiz_refresh", use_container_width=True):
+    if st.button("🔄 Analizi yenile", key="mobil_analiz_refresh", width="stretch"):
         refresh_analysis_data()
         st.rerun()
 
@@ -963,7 +963,7 @@ with tab_musteri:
         ad = st.text_input("Ad Soyad", placeholder="Örn. Ayşe Yılmaz")
         tel = st.text_input("Telefon", placeholder="05xx xxx xx xx")
         konum = st.text_input("Konum linki (Google Maps)", placeholder="https://maps.google.com/...")
-        if st.form_submit_button("Kuyruğa ekle", type="primary", use_container_width=True):
+        if st.form_submit_button("Kuyruğa ekle", type="primary", width="stretch"):
             if not ad.strip():
                 st.warning("Ad girin.")
             else:
@@ -1001,7 +1001,7 @@ with tab_musteri:
                         key=f"m_loc_{mid}_{i}",
                         placeholder="https://maps.google.com/...",
                     )
-                    if st.button("Güncelle", key=f"m_btn_{mid}_{i}", use_container_width=True):
+                    if st.button("Güncelle", key=f"m_btn_{mid}_{i}", width="stretch"):
                         if not en.strip():
                             st.warning("Ad boş olamaz.")
                         else:
@@ -1019,7 +1019,7 @@ with tab_personel:
     with st.form("basit_personel_form"):
         pad = st.text_input("Ad Soyad", placeholder="Örn. Ahmet Yılmaz")
         ptel = st.text_input("Telefon", placeholder="05xx xxx xx xx")
-        if st.form_submit_button("Personel ekle (kuyruk)", type="primary", use_container_width=True):
+        if st.form_submit_button("Personel ekle (kuyruk)", type="primary", width="stretch"):
             if not pad.strip():
                 st.warning("Ad girin.")
             else:
@@ -1044,7 +1044,7 @@ with tab_personel:
             with st.container(border=True):
                 st.markdown(f"### 👷 {p['name']}")
                 st.caption(f"📞 {p.get('phone') or '—'}")
-                if st.button("🗑️ Personeli sil", key=f"del_staff_{p['id']}_{i}", use_container_width=True):
+                if st.button("🗑️ Personeli sil", key=f"del_staff_{p['id']}_{i}", width="stretch"):
                     add_to_queue("Personel sil", "DELETE FROM service_personnel WHERE id=%s", (p["id"],))
                     st.rerun()
 
@@ -1053,13 +1053,13 @@ with tab_gider:
     st.caption("Gider kaydı girin. Ana panel analizine otomatik yansır.")
     g1, g2, g3 = st.columns([1, 2, 1])
     with g1:
-        if st.button("◀ Ay", key="gider_prev_m", use_container_width=True):
+        if st.button("◀ Ay", key="gider_prev_m", width="stretch"):
             st.session_state._month_nav = "prev"
             st.rerun()
     with g2:
         st.markdown(f"**{calendar.month_name[sm]} {sy}**")
     with g3:
-        if st.button("Ay ▶", key="gider_next_m", use_container_width=True):
+        if st.button("Ay ▶", key="gider_next_m", width="stretch"):
             st.session_state._month_nav = "next"
             st.rerun()
     ms_gider = f"{sm:02d}.{sy}"
@@ -1069,7 +1069,7 @@ with tab_gider:
         gaciklama = st.text_input("Açıklama", placeholder="Detay (isteğe bağlı)")
         gtarih = st.date_input("Tarih", max(date.today(), min_visible_date()), min_value=min_visible_date())
         gtutar = st.number_input("Miktar (₺)", min_value=0.0, step=50.0)
-        if st.form_submit_button("Kuyruğa ekle", type="primary", use_container_width=True):
+        if st.form_submit_button("Kuyruğa ekle", type="primary", width="stretch"):
             if not gisim.strip():
                 st.warning("İsim girin.")
             elif gtutar <= 0:
@@ -1129,7 +1129,7 @@ with tab_gider:
                         "Miktar (₺)", min_value=0.0, step=50.0,
                         value=float(e.get("amount") or 0), key=f"g_t_{eid}_{i}",
                     )
-                    if st.button("Güncelle", key=f"g_btn_{eid}_{i}", use_container_width=True):
+                    if st.button("Güncelle", key=f"g_btn_{eid}_{i}", width="stretch"):
                         if not ed_isim.strip():
                             st.warning("İsim girin.")
                         elif ed_tutar <= 0:
@@ -1150,7 +1150,7 @@ with tab_gider:
                                 description=ed_aciklama.strip(), amount=float(ed_tutar),
                             )
                             st.rerun()
-                if st.button("🗑️ Sil", key=f"del_gider_{eid}_{i}", use_container_width=True):
+                if st.button("🗑️ Sil", key=f"del_gider_{eid}_{i}", width="stretch"):
                     add_to_queue("Gider sil", "DELETE FROM expenses WHERE id=%s", (eid,))
                     expenses_list.remove(e)
                     st.rerun()

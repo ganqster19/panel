@@ -26,7 +26,7 @@ def require_auth(panel: str) -> None:
     st.markdown(f"### {_PANELS[panel]}")
     st.caption("Devam etmek için şifre girin.")
     pwd = st.text_input("Şifre", type="password", key=f"login_pwd_{panel}")
-    if st.button("Giriş", type="primary", use_container_width=True, key=f"login_btn_{panel}"):
+    if st.button("Giriş", type="primary", width="stretch", key=f"login_btn_{panel}"):
         if pwd == auth[secret_key]:
             st.session_state[session_key] = True
             st.rerun()

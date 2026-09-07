@@ -127,7 +127,7 @@ sub_meta = db.get("subscription_meta", {})
 # --- Üst bar ---
 c1, c2, c3 = st.columns([1, 2, 1])
 with c1:
-    if st.button("🔄", help="Yenile", use_container_width=True):
+    if st.button("🔄", help="Yenile", width="stretch"):
         refresh()
         st.rerun()
 with c2:
@@ -144,14 +144,14 @@ with col_d:
     )
     st.session_state.servis_date = gun.strftime("%d.%m.%Y")
 with col_m:
-    if st.button("◀ Dün", use_container_width=True):
+    if st.button("◀ Dün", width="stretch"):
         from datetime import timedelta
         d = datetime.strptime(st.session_state.servis_date, "%d.%m.%Y").date() - timedelta(days=1)
         if d >= min_d:
             st.session_state.servis_date = d.strftime("%d.%m.%Y")
         st.rerun()
 with col_y:
-    if st.button("Yarın ▶", use_container_width=True):
+    if st.button("Yarın ▶", width="stretch"):
         from datetime import timedelta
         d = datetime.strptime(st.session_state.servis_date, "%d.%m.%Y").date() + timedelta(days=1)
         st.session_state.servis_date = d.strftime("%d.%m.%Y")
