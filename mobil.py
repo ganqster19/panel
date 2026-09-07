@@ -21,9 +21,15 @@ from vardiya.db import (
     aggregate_visit_summaries, customer_ranking_from_summaries,
     JOB_TAG_ADD_LABELS, job_tag_from_label, job_tag_label, job_tag_icon,
     job_tag_css, job_tag_option_index, is_subscription_tag, job_tag_css_block,
-    resolve_row_staff_name, render_ciro_pie, render_name_assignment,
+    resolve_row_staff_name, render_ciro_pie,
 )
 from vardiya.auth import require_auth
+
+try:
+    from vardiya.db import render_name_assignment
+except ImportError:  # sunucuda eski vardiya/db.py varsa panel tamamen çökmesin
+    def render_name_assignment(*_a, **_k):
+        st.warning("Personel atama modülü eski — uygulamayı Reboot edin.")
 
 st.set_page_config(
     page_title="Vardiya Mobil",

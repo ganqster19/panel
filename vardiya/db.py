@@ -1,4 +1,6 @@
 """Mobil ve servis panelleri için ortak DB bağlantısı."""
+DB_MODULE_VERSION = "2026.09.07-1"  # panellerin sürüm kontrolü için
+
 import calendar
 import streamlit as st
 import psycopg2

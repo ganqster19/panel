@@ -24,8 +24,14 @@ from vardiya.db import (
     build_visit_summaries, aggregate_visit_summaries, customer_ranking_from_summaries,
     db_diagnostics, JOB_TAG_ADD_LABELS, job_tag_from_label, job_tag_label,
     job_tag_icon, job_tag_css, job_tag_option_index, is_subscription_tag,
-    job_tag_css_block, render_ciro_pie, render_name_assignment,
+    job_tag_css_block, render_ciro_pie,
 )
+
+try:
+    from vardiya.db import render_name_assignment
+except ImportError:  # sunucuda eski vardiya/db.py varsa panel tamamen çökmesin
+    def render_name_assignment(*_a, **_k):
+        st.warning("Personel atama modülü eski — uygulamayı Reboot edin.")
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="Vardiya (Offline & Hızlı)", page_icon="⚡", layout="wide")
