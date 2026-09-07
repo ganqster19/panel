@@ -929,7 +929,7 @@ with tab_analiz:
     m4.metric("Maliyet", f"{agg['maliyet']:,.0f} ₺")
 
     st.markdown("#### 🥧 Ciro nereden geliyor?")
-    st.caption("Ay sonu planı: seçili ayın müşteri cirosu etiketlere göre.")
+    st.caption("Dış halkada her müşteri bir dilim; dilimler etiketine göre gruplanır. İç halka etiket toplamıdır.")
     render_ciro_pie(summaries, title=f"{calendar.month_name[sm]} {sy} ciro dağılımı")
 
     if sec_cid is None and summaries:

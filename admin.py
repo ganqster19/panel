@@ -1293,10 +1293,14 @@ with tabs[5]:
     c5.metric("🎓 Öğrenci Ziyaretleri", f"{ogrenci_is_sayisi} Adet", f"👔 Pro: {pro_is_sayisi}")
 
     st.markdown("#### 🥧 Ciro nereden geliyor?")
-    st.caption("Seçili ayın ziyaret cirosu etiketlere göre (otel, anahtar teslim, tek sefer, abonelik).")
+    st.caption("Dış halkada her müşteri bir dilim; dilimler etiketine (otel, anahtar teslim, tek sefer, abonelik) göre gruplanır.")
     render_ciro_pie(
         [
-            {"job_tag": visit_group_label(g).get("job_tag"), "ciro": visit_customer_revenue(g)}
+            {
+                "job_tag": visit_group_label(g).get("job_tag"),
+                "customer": visit_group_label(g).get("name"),
+                "ciro": visit_customer_revenue(g),
+            }
             for g in visit_groups_analysis
         ],
         title=f"{calendar.month_name[sm]} {sy} ciro dağılımı",

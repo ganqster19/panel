@@ -2,6 +2,7 @@
 DB_MODULE_VERSION = "2026.09.07-1"  # panellerin sürüm kontrolü için
 
 import calendar
+import math
 import streamlit as st
 import psycopg2
 from datetime import datetime, timedelta, date
@@ -151,44 +152,125 @@ def ciro_by_tag(summaries):
     return totals
 
 
+def lighten_hex(color, factor):
+    """Rengi beyaza doğru açar — aynı etiketteki müşteriler ayırt edilsin."""
+    h = (color or "#888888").lstrip("#")
+    if len(h) != 6:
+        return color
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    f = max(0.0, min(0.75, float(factor)))
+    r, g, b = (int(v + (255 - v) * f) for v in (r, g, b))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def customer_ciro_slices(summaries):
+    """Her müşteri için bir dilim; dilimler etiketine göre sıralı ve renklendirilmiş."""
+    totals = {}
+    for s in summaries:
+        val = float(s.get("ciro") or 0)
+        if val <= 0:
+            continue
+        tag = normalize_job_tag(s.get("job_tag"))
+        cust = (s.get("customer") or s.get("name") or "").strip() or "—"
+        totals[(tag, cust)] = totals.get((tag, cust), 0.0) + val
+
+    slices = []
+    for tag in JOB_TAG_ORDER:
+        items = sorted(
+            ((c, v) for (t, c), v in totals.items() if t == tag),
+            key=lambda x: (-x[1], x[0].casefold()),
+        )
+        meta = JOB_TAGS[tag]
+        for i, (cust, val) in enumerate(items):
+            slices.append({
+                "tag": tag,
+                "Etiket": meta["label"],
+                "Müşteri": cust,
+                "Ciro": val,
+                "renk": lighten_hex(meta["color"], min(0.6, 0.13 * i)),
+            })
+    return slices
+
+
+def _arc_angles(rows, toplam):
+    """Dilimlere sıralı başlangıç/bitiş açısı (radyan) ver."""
+    acc = 0.0
+    for r in rows:
+        r["theta"] = acc
+        acc += 2 * math.pi * (r["Ciro"] / toplam if toplam else 0)
+        r["theta2"] = acc
+    return rows
+
+
 def render_ciro_pie(summaries, title="Ay sonu ciro kaynağı"):
-    """Etiket bazlı pasta grafik."""
-    totals = ciro_by_tag(summaries)
-    rows = [
-        {"Etiket": job_tag_label(k), "Ciro": v, "tag": k}
-        for k, v in totals.items() if v > 0
-    ]
-    if not rows:
+    """Dış halka: müşteri dilimleri. İç halka: etiket grupları."""
+    dilimler = customer_ciro_slices(summaries)
+    if not dilimler:
         st.caption("Bu dönemde ciro yok — pasta grafik için ziyaret kaydı gerekir.")
         return
+
+    toplam = sum(r["Ciro"] for r in dilimler)
+    for r in dilimler:
+        r["Pay"] = (r["Ciro"] / toplam * 100) if toplam else 0
+    _arc_angles(dilimler, toplam)
+
+    etiketler = []
+    for tag in JOB_TAG_ORDER:
+        val = sum(r["Ciro"] for r in dilimler if r["tag"] == tag)
+        if val <= 0:
+            continue
+        etiketler.append({
+            "tag": tag,
+            "Etiket": JOB_TAGS[tag]["label"],
+            "Ciro": val,
+            "Pay": (val / toplam * 100) if toplam else 0,
+            "renk": JOB_TAGS[tag]["color"],
+            "Müşteri sayısı": sum(1 for r in dilimler if r["tag"] == tag),
+        })
+    _arc_angles(etiketler, toplam)
+
     try:
         import pandas as pd
-        df = pd.DataFrame(rows)
         import altair as alt
-        domain = [r["Etiket"] for r in rows]
-        colors = [job_tag_meta(r["tag"])["color"] for r in rows]
-        chart = (
-            alt.Chart(df)
-            .mark_arc(innerRadius=50)
-            .encode(
-                theta=alt.Theta("Ciro:Q", stack=True),
-                color=alt.Color(
-                    "Etiket:N",
-                    scale=alt.Scale(domain=domain, range=colors),
-                    legend=alt.Legend(title="Kaynak"),
-                ),
-                tooltip=["Etiket", alt.Tooltip("Ciro:Q", format=",.0f")],
+
+        def halka(rows, r0, r1, tooltip):
+            return (
+                alt.Chart(pd.DataFrame(rows))
+                .mark_arc(innerRadius=r0, outerRadius=r1, stroke="#ffffff", strokeWidth=1)
+                .encode(
+                    theta=alt.Theta("theta:Q", scale=None),
+                    theta2="theta2:Q",
+                    color=alt.Color("renk:N", scale=None, legend=None),
+                    tooltip=tooltip,
+                )
             )
-            .properties(title=title, height=300)
+
+        ic = halka(etiketler, 0, 62, [
+            alt.Tooltip("Etiket:N"),
+            alt.Tooltip("Ciro:Q", format=",.0f", title="Etiket cirosu"),
+            alt.Tooltip("Pay:Q", format=".1f", title="Pay %"),
+            alt.Tooltip("Müşteri sayısı:Q"),
+        ])
+        dis = halka(dilimler, 68, 120, [
+            alt.Tooltip("Müşteri:N"),
+            alt.Tooltip("Etiket:N"),
+            alt.Tooltip("Ciro:Q", format=",.0f"),
+            alt.Tooltip("Pay:Q", format=".1f", title="Pay %"),
+        ])
+        st.altair_chart(
+            alt.layer(ic, dis).properties(title=title, height=340),
+            use_container_width=True,
         )
-        st.altair_chart(chart, use_container_width=True)
     except Exception:
-        for r in rows:
-            st.write(f"**{r['Etiket']}:** {r['Ciro']:,.0f} ₺")
-    toplam = sum(r["Ciro"] for r in rows)
-    for r in rows:
-        pct = (r["Ciro"] / toplam * 100) if toplam else 0
-        st.caption(f"{job_tag_icon(r['tag'])} **{r['Etiket']}:** {r['Ciro']:,.0f} ₺ ({pct:.0f}%)")
+        st.caption("Grafik çizilemedi — dağılım aşağıda listelenmiştir.")
+
+    for e in etiketler:
+        st.markdown(
+            f"{job_tag_icon(e['tag'])} **{e['Etiket']}:** "
+            f"{e['Ciro']:,.0f} ₺ (%{e['Pay']:.0f}) · {e['Müşteri sayısı']} müşteri"
+        )
+        for r in [d for d in dilimler if d["tag"] == e["tag"]]:
+            st.caption(f"　• {r['Müşteri']} — {r['Ciro']:,.0f} ₺ (%{r['Pay']:.0f})")
 
 
 def subscription_session_no(group_id) -> Optional[int]:
