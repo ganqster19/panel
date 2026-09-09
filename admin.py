@@ -10,6 +10,9 @@ from psycopg2.extras import RealDictCursor, execute_values
 import calendar
 import uuid
 import os
+import re
+import json
+import difflib
 from datetime import datetime, timedelta, date
 from dataclasses import dataclass, field
 from vardiya.perf import PerfTimer, perf_log
@@ -24,7 +27,8 @@ from vardiya.db import (
     build_visit_summaries, aggregate_visit_summaries, customer_ranking_from_summaries,
     db_diagnostics, JOB_TAG_ADD_LABELS, job_tag_from_label, job_tag_label,
     job_tag_icon, job_tag_css, job_tag_option_index, is_subscription_tag,
-    job_tag_css_block, render_ciro_pie,
+    job_tag_css_block, render_ciro_pie, ciro_by_tag,
+    personnel_assign_sql, apply_person_to_row,
 )
 
 try:
@@ -294,97 +298,317 @@ def commit_queue():
         conn.close()
 
 # --- 🤖 AI ARAÇLARI (FONKSİYONLAR) ---
+# Asistan panelin kendi giriş mantığını kullanır: iş satırları Is sınıfından üretilir ve
+# hiçbir şey doğrudan yazılmaz — her işlem sidebar'daki kuyruğa düşer, kullanıcı onaylar.
 
-def ai_is_ekle(musteri_adi: str, prof_sayisi: int, personel_yevmiyesi: float, musteri_tutari: float, abonelik_mi: bool, is_tarihi: str, atanacak_personeller: list[str]) -> str:
-    """Yapay zekanın çıkardığı verilerle sisteme yeni iş (vardiya) ekler.
-    Abonelikte, o gün için alınan ilk ödeme peşin sayılır (is_prepaid=1 olarak işaretlenir)."""
-    cid = None
-    for c in st.session_state.db_data.get('customers', []):
-        if c['name'].lower() == musteri_adi.lower():
-            cid = c['id']
-            break
-            
-    if not cid: return f"Hata: '{musteri_adi}' isimli bir müşteri bulunamadı."
+AI_AYLAR = {
+    "ocak": 1, "şubat": 2, "subat": 2, "mart": 3, "nisan": 4, "mayıs": 5, "mayis": 5,
+    "haziran": 6, "temmuz": 7, "ağustos": 8, "agustos": 8, "eylül": 9, "eylul": 9,
+    "ekim": 10, "kasım": 11, "kasim": 11, "aralık": 12, "aralik": 12,
+}
+AI_GUNLER = {
+    "pazartesi": 0, "salı": 1, "sali": 1, "çarşamba": 2, "carsamba": 2,
+    "perşembe": 3, "persembe": 3, "cuma": 4, "cumartesi": 5, "pazar": 6,
+}
 
-    pkg_id = str(uuid.uuid4())[:8]
-    tag = 'subscription' if abonelik_mi else 'one_time'
-    
-    pro_ids = []
-    for p_name in atanacak_personeller:
-        for p in st.session_state.db_data.get('pros', []):
-            if p_name.lower() in p['name'].lower():
-                pro_ids.append(p['id'])
-                break
-                
-    gercek_kisi_sayisi = int(max(prof_sayisi, len(pro_ids), 1))
-    
-    for i in range(gercek_kisi_sayisi):
-        cut = float(musteri_tutari) if i == 0 else 0.0 
-        prepaid = 1 if (i == 0 and cut > 0) else 0
-        assigned_id = pro_ids[i] if i < len(pro_ids) else None
-        query = "INSERT INTO jobs (group_id, date, customer_id, job_type, price_worker, price_customer, job_tag, assigned_pro_id, is_prepaid) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
-        params = (pkg_id, is_tarihi, cid, 'pro', float(personel_yevmiyesi), cut, tag, assigned_id, prepaid)
-        add_to_queue(f"🤖 AI Ekleme: {musteri_adi}", query, params)
-        
-    return f"Başarılı! {musteri_adi} için {is_tarihi} tarihine {gercek_kisi_sayisi} personellik iş oluşturuldu."
+
+def _ai_tarih_kur(d, mo, y) -> str:
+    try:
+        return date(int(y), int(mo), int(d)).strftime("%d.%m.%Y")
+    except (ValueError, TypeError):
+        return ""
+
+
+def ai_tarih(metin) -> str:
+    """'yarın', '3 temmuz', '2026-09-10', '10.9' gibi girdileri GG.AA.YYYY'ye çevirir."""
+    t = str(metin or "").strip().casefold()
+    if not t:
+        return ""
+    bugun = date.today()
+    if t in ("bugün", "bugun", "bu gün", "bu gun"):
+        return bugun.strftime("%d.%m.%Y")
+    if t in ("yarın", "yarin"):
+        return (bugun + timedelta(days=1)).strftime("%d.%m.%Y")
+    if t in ("öbür gün", "obur gun", "ertesi gün", "ertesi gun"):
+        return (bugun + timedelta(days=2)).strftime("%d.%m.%Y")
+    if t in ("dün", "dun"):
+        return (bugun - timedelta(days=1)).strftime("%d.%m.%Y")
+
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", t)
+    if m:
+        return _ai_tarih_kur(m.group(3), m.group(2), m.group(1))
+
+    m = re.match(r"^(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?$", t)
+    if m:
+        yil = int(m.group(3)) if m.group(3) else bugun.year
+        if yil < 100:
+            yil += 2000
+        return _ai_tarih_kur(m.group(1), m.group(2), yil)
+
+    m = re.match(r"^(\d{1,2})\s+([a-zçğıöşü]+)\s*(\d{4})?$", t)
+    if m and m.group(2) in AI_AYLAR:
+        yil = int(m.group(3)) if m.group(3) else bugun.year
+        return _ai_tarih_kur(m.group(1), AI_AYLAR[m.group(2)], yil)
+
+    for ad, wd in AI_GUNLER.items():
+        if ad in t:
+            fark = (wd - bugun.weekday()) % 7 or 7
+            return (bugun + timedelta(days=fark)).strftime("%d.%m.%Y")
+    return ""
+
+
+def _ai_musteri(ad):
+    """Müşteriyi bul. Dönen: (müşteri | None, aday isimler)."""
+    custs = st.session_state.db_data.get('customers', []) or []
+    q = str(ad or "").strip().casefold()
+    if not q:
+        return None, []
+    for c in custs:
+        if (c.get('name') or "").casefold() == q:
+            return c, []
+    kismi = [c for c in custs if q in (c.get('name') or "").casefold()]
+    if len(kismi) == 1:
+        return kismi[0], []
+    if len(kismi) > 1:
+        return None, [c['name'] for c in kismi]
+    adlar = {(c.get('name') or "").casefold(): c.get('name') for c in custs}
+    yakin = difflib.get_close_matches(q, list(adlar.keys()), n=4, cutoff=0.55)
+    return None, [adlar[y] for y in yakin]
+
+
+def _ai_kisi(ad):
+    """Personeli isimle bul: profesyonel, öğrenci veya servis listesi."""
+    q = str(ad or "").strip().casefold()
+    if not q:
+        return None
+    data = st.session_state.db_data
+    for kind, key in (("pro", "pros"), ("student", "students"), ("service", "service_personnel")):
+        for p in data.get(key, []) or []:
+            nm = (p.get('name') or "").casefold()
+            if nm and (nm == q or q in nm):
+                return {
+                    "kind": kind, "id": p.get('id'),
+                    "name": p.get('name'), "phone": p.get('phone'),
+                }
+    return None
+
+
+def _ai_tip(t) -> str:
+    s = str(t or "").strip().casefold()
+    return "student" if s.startswith(("ogr", "öğr", "stu")) else "pro"
+
+
+def _ai_etiket(t) -> str:
+    s = str(t or "").strip().casefold()
+    if "abone" in s or "kota" in s:
+        return "subscription"
+    if "otel" in s or "hotel" in s:
+        return "hotel"
+    if "anahtar" in s or "teslim" in s or "inşaat" in s or "insaat" in s:
+        return "turnkey"
+    return "one_time"
+
+
+def _ai_musteri_isleri(cid, tarih):
+    return [
+        j for j in st.session_state.db_data.get('jobs', [])
+        if j.get('customer_id') == cid and (j.get('date') or "") == tarih
+    ]
+
+
+def ai_is_ekle(is_json: str) -> str:
+    """Panelin 'İş Ekle' formuyla birebir aynı şekilde yeni iş oluşturur. Tek argüman JSON metnidir.
+
+    Şema (yalnızca bildiğin alanları doldur):
+    {
+      "musteri": "Ahmet Yılmaz",
+      "etiket": "tek seferlik" | "otel" | "anahtar teslim" | "abonelik",
+      "tarihler": ["10.09.2026", "12.09.2026"],
+      "kota": 4,
+      "personeller": [{"tip": "pro", "ucret": 1500}, {"tip": "ogrenci", "ucret": 800}],
+      "kisi_sayisi": 2, "yevmiye": 1000,
+      "musteri_tutari": 5000,
+      "fiyat_modu": "gunluk" | "toplam",
+      "isimler": ["Ali", "Veli"],
+      "not": "kapıcıdan anahtar alınacak"
+    }
+    Kurallar: abonelikte tarih verilmez, "kota" ziyaret hakkı sayısıdır ve kotalar havuzda bekler.
+    Diğer etiketlerde en az bir tarih gerekir; her tarih ayrı bir ziyarettir.
+    "personeller" verilirse her eleman o ziyarete giden bir kişidir (tip + yevmiye).
+    "fiyat_modu" gunluk ise tutar her ziyarette, toplam ise tüm iş için bir kez alınır.
+    "isimler" verilirse personel slotlarına sırayla isimle atama yapılır.
+    Birden fazla farklı iş varsa bu aracı her iş için ayrı çağır."""
+    try:
+        veri = json.loads(is_json) if isinstance(is_json, str) else dict(is_json or {})
+    except Exception:
+        m = re.search(r"\{.*\}", str(is_json or ""), re.S)
+        if not m:
+            return "Hata: is_json geçerli JSON değil. Şemaya uygun tek bir JSON nesnesi gönder."
+        try:
+            veri = json.loads(m.group(0))
+        except Exception as e:
+            return f"Hata: JSON okunamadı ({e}). Şemaya uygun tek bir JSON nesnesi gönder."
+    if not isinstance(veri, dict):
+        return "Hata: is_json bir JSON nesnesi (süslü parantezli) olmalı."
+
+    musteri, adaylar = _ai_musteri(veri.get("musteri"))
+    if not musteri:
+        if adaylar:
+            return (
+                f"Hata: '{veri.get('musteri')}' netleşmedi. Bunlardan biri mi: "
+                + ", ".join(adaylar) + "? Kullanıcıya sor."
+            )
+        return (
+            f"Hata: '{veri.get('musteri')}' kayıtlı müşteri değil. "
+            "ai_musteri_ekle ile ekleyip kaydedildikten sonra iş girilebilir."
+        )
+
+    tag = _ai_etiket(veri.get("etiket"))
+
+    personeller = []
+    for p in veri.get("personeller") or []:
+        if isinstance(p, dict):
+            personeller.append({
+                "tip": _ai_tip(p.get("tip")),
+                "ucret": float(p.get("ucret") or p.get("yevmiye") or 0),
+            })
+    if not personeller:
+        adet = max(1, int(veri.get("kisi_sayisi") or 1))
+        ucret = float(veri.get("yevmiye") or 0)
+        tip = _ai_tip(veri.get("personel_tipi"))
+        personeller = [{"tip": tip, "ucret": ucret} for _ in range(adet)]
+
+    if is_subscription_tag(tag):
+        kota = int(veri.get("kota") or len(veri.get("tarihler") or []) or 1)
+        tarihler = [None] * max(1, kota)
+    else:
+        ham = veri.get("tarihler") or ([veri.get("tarih")] if veri.get("tarih") else [])
+        tarihler = []
+        for t in ham:
+            ds = ai_tarih(t)
+            if not ds:
+                return f"Hata: '{t}' tarihi anlaşılmadı. GG.AA.YYYY biçiminde gönder."
+            tarihler.append(datetime.strptime(ds, "%d.%m.%Y").date())
+        if not tarihler:
+            return "Hata: tek seferlik/otel/anahtar teslim işlerde en az bir tarih gerekir."
+
+    fiyat_modu = "Toplam" if str(veri.get("fiyat_modu") or "").casefold().startswith("top") else "Günlük"
+
+    is_obj = Is(
+        musteri_id=musteri['id'], musteri_adi=musteri['name'], job_tag=tag,
+        tarihler=tarihler, musteri_tutari=float(veri.get("musteri_tutari") or 0),
+        fiyat_modu=fiyat_modu, personeller=personeller,
+    )
+
+    isimler = [str(x).strip() for x in (veri.get("isimler") or []) if str(x).strip()]
+    bulunamayan = [n for n in isimler if not _ai_kisi(n)]
+    job_note = (veri.get("not") or veri.get("aciklama") or "").strip() or None
+
+    satirlar = is_obj.db_satirlarina_donustur()
+    sql = """INSERT INTO jobs (group_id, date, customer_id, job_type, price_worker,
+                 price_customer, job_tag, is_prepaid, staff_name, staff_phone,
+                 assigned_pro_id, assigned_student_id, job_note)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
+
+    for idx, (gid, ds, cid, jtype, wp, cut, jtag, prepaid) in enumerate(satirlar):
+        slot = idx % len(personeller)
+        kisi = _ai_kisi(isimler[slot]) if slot < len(isimler) else None
+        if kisi and kisi["kind"] in ("pro", "student"):
+            jtype = kisi["kind"]
+        pro_id = kisi["id"] if kisi and kisi["kind"] == "pro" else None
+        stu_id = kisi["id"] if kisi and kisi["kind"] == "student" else None
+        add_to_queue(
+            f"🤖 AI İş: {is_obj.musteri_adi}",
+            sql,
+            (gid, ds, cid, jtype, wp, cut, jtag, prepaid,
+             kisi["name"] if kisi else None, (kisi.get("phone") if kisi else None) or None,
+             pro_id, stu_id, job_note),
+        )
+        st.session_state.db_data.setdefault('jobs', []).append({
+            'id': f"tmp_{uuid.uuid4().hex[:8]}", 'group_id': gid, 'date': ds,
+            'customer_id': cid, 'job_type': jtype, 'price_worker': wp,
+            'price_customer': cut, 'job_tag': jtag, 'is_prepaid': prepaid,
+            'name': is_obj.musteri_adi, 'is_collected': 0, 'is_worker_paid': 0,
+            'assigned_student_id': stu_id, 'assigned_pro_id': pro_id,
+            'staff_name': kisi["name"] if kisi else None, 'job_note': job_note,
+        })
+
+    birim = "kota" if is_subscription_tag(tag) else "ziyaret"
+    mesaj = (
+        f"Kuyruğa eklendi: {is_obj.musteri_adi} · {job_tag_label(tag)} · "
+        f"{len(is_obj.tarihler)} {birim} × {len(personeller)} personel = {len(satirlar)} satır. "
+        f"Müşteri tutarı {is_obj.musteri_tutari:,.0f} ₺ ({fiyat_modu}), "
+        f"personel maliyeti {is_obj.toplam_personel_maliyeti:,.0f} ₺, "
+        f"tahmini net {is_obj.net_kar:,.0f} ₺."
+    )
+    if bulunamayan:
+        mesaj += " Atanamayan isim(ler): " + ", ".join(bulunamayan) + "."
+    return mesaj + " Onay için sidebar'daki 'DEĞİŞİKLİKLERİ KAYDET' butonuna basılmalı."
+
 
 def ai_is_tasi(musteri_adi: str, eski_tarih: str, yeni_tarih: str) -> str:
-    """Bir müşterinin eski tarihteki işlerini/aboneliğini yeni tarihe taşır."""
-    cid = None
-    for c in st.session_state.db_data.get('customers', []):
-        if musteri_adi.lower() in c['name'].lower():
-            cid = c['id']
-            break
-            
-    if not cid: return f"Hata: '{musteri_adi}' isimli bir müşteri bulunamadı."
-    
-    query = "UPDATE jobs SET date = %s WHERE customer_id = %s AND date = %s"
-    params = (yeni_tarih, cid, eski_tarih)
-    add_to_queue(f"🤖 AI Taşıma: {musteri_adi}", query, params)
-    return f"Başarılı! {musteri_adi} müşterisinin {eski_tarih} tarihindeki işleri {yeni_tarih} tarihine taşındı."
+    """Bir müşterinin belirli bir günündeki tüm işlerini/kotalarını başka güne taşır."""
+    musteri, adaylar = _ai_musteri(musteri_adi)
+    if not musteri:
+        return f"Hata: '{musteri_adi}' bulunamadı." + (f" Adaylar: {', '.join(adaylar)}" if adaylar else "")
+    eski, yeni = ai_tarih(eski_tarih), ai_tarih(yeni_tarih)
+    if not eski or not yeni:
+        return "Hata: tarihler anlaşılmadı, GG.AA.YYYY biçiminde gönder."
+    if not _ai_musteri_isleri(musteri['id'], eski):
+        return f"Hata: {musteri['name']} için {eski} tarihinde iş yok."
+    add_to_queue(
+        f"🤖 AI Taşıma: {musteri['name']}",
+        "UPDATE jobs SET date = %s WHERE customer_id = %s AND date = %s",
+        (yeni, musteri['id'], eski),
+    )
+    return f"Kuyruğa eklendi: {musteri['name']} işleri {eski} → {yeni} taşınacak."
+
 
 def ai_is_iptal(musteri_adi: str, tarih: str) -> str:
-    """Bir müşterinin belirtilen tarihteki tüm işlerini sistemden tamamen siler."""
-    cid = None
-    for c in st.session_state.db_data.get('customers', []):
-        if musteri_adi.lower() in c['name'].lower():
-            cid = c['id']
-            break
-            
-    if not cid: return f"Hata: '{musteri_adi}' isimli müşteri bulunamadı."
-    
-    query = "DELETE FROM jobs WHERE customer_id = %s AND date = %s"
-    params = (cid, tarih)
-    add_to_queue(f"🤖 AI İptal: {musteri_adi}", query, params)
-    return f"Başarılı! {musteri_adi} müşterisinin {tarih} tarihindeki kayıtları iptal edildi ve silindi."
+    """Bir müşterinin belirtilen günündeki tüm iş kayıtlarını siler."""
+    musteri, adaylar = _ai_musteri(musteri_adi)
+    if not musteri:
+        return f"Hata: '{musteri_adi}' bulunamadı." + (f" Adaylar: {', '.join(adaylar)}" if adaylar else "")
+    ds = ai_tarih(tarih)
+    if not ds:
+        return "Hata: tarih anlaşılmadı, GG.AA.YYYY biçiminde gönder."
+    mevcut = _ai_musteri_isleri(musteri['id'], ds)
+    if not mevcut:
+        return f"Hata: {musteri['name']} için {ds} tarihinde iş yok."
+    add_to_queue(
+        f"🤖 AI İptal: {musteri['name']}",
+        "DELETE FROM jobs WHERE customer_id = %s AND date = %s",
+        (musteri['id'], ds),
+    )
+    return f"Kuyruğa eklendi: {musteri['name']} · {ds} · {len(mevcut)} satır silinecek."
+
 
 def _musteri_bul(musteri_adi: str):
-    for c in st.session_state.db_data.get('customers', []):
-        if musteri_adi.lower() in c['name'].lower():
-            return c['id']
-    return None
+    musteri, _ = _ai_musteri(musteri_adi)
+    return musteri['id'] if musteri else None
+
 
 def _personel_bul(personel_adi: str):
     for p in st.session_state.db_data.get('pros', []):
-        if personel_adi.lower() in p['name'].lower():
+        if str(personel_adi or "").casefold() in (p.get('name') or "").casefold():
             return p
     return None
 
+
 def ai_kota_ekle(musteri_adi: str, eklenecek_kota: int, personel_yevmiyesi: float = 0.0) -> str:
-    """Bir müşterinin mevcut aboneliğine, tarihsiz (havuzda bekleyen) yeni kota/hak ekler.
-    Her kota 1 personeli (1 iş satırını) temsil eder ve müşteriden ayrıca ücret alınmaz (is_prepaid=0),
-    çünkü bu sistem sadece iş takibi amaçlıdır. Kullanıcı 'X'e 2 kota daha ekle' derse bu araç kullanılır."""
+    """Mevcut aboneliğe tarihsiz (havuzda bekleyen) yeni kota ekler. Her kota 1 personeli temsil eder."""
     cid = _musteri_bul(musteri_adi)
-    if not cid: return f"Hata: '{musteri_adi}' isimli müşteri bulunamadı."
+    if not cid:
+        return f"Hata: '{musteri_adi}' isimli müşteri bulunamadı."
 
     mevcut_pids = [j['group_id'].split('_')[0] for j in st.session_state.db_data.get('jobs', [])
                    if j.get('customer_id') == cid and j.get('job_tag') == 'subscription' and j.get('group_id')]
     if not mevcut_pids:
-        return f"Hata: {musteri_adi} için mevcut bir abonelik paketi bulunamadı. Önce ai_is_ekle ile abonelik=True olarak iş oluşturun."
+        return f"Hata: {musteri_adi} için abonelik paketi yok. Önce ai_is_ekle ile etiket='abonelik' işi oluştur."
     pid = mevcut_pids[0]
 
     mevcut_seans_no = [int(j['group_id'].split('_')[1]) for j in st.session_state.db_data.get('jobs', [])
-                        if j.get('group_id', '').startswith(f"{pid}_") and j['group_id'].split('_')[1].isdigit()]
+                       if j.get('group_id', '').startswith(f"{pid}_") and j['group_id'].split('_')[1].isdigit()]
     baslangic = (max(mevcut_seans_no) + 1) if mevcut_seans_no else 0
 
     for i in range(int(eklenecek_kota)):
@@ -393,104 +617,417 @@ def ai_kota_ekle(musteri_adi: str, eklenecek_kota: int, personel_yevmiyesi: floa
         params = (gid, '', cid, 'pro', float(personel_yevmiyesi), 0.0, 'subscription', 0)
         add_to_queue(f"🤖 Kota Ekle: {musteri_adi}", query, params)
 
-    return f"Başarılı! {musteri_adi} aboneliğine {eklenecek_kota} yeni kota eklendi (havuzda bekliyor, tarih atanmadı)."
+    return f"Kuyruğa eklendi: {musteri_adi} aboneliğine {eklenecek_kota} kota (havuzda bekleyecek)."
+
 
 def ai_kota_sil(musteri_adi: str, silinecek_kota: int) -> str:
-    """Bir müşterinin henüz tarihe atanmamış (havuzda bekleyen) abonelik kotalarından belirtilen sayıda siler.
-    Zaten bir tarihe atanmış/işlenmiş kotalara dokunmaz."""
+    """Havuzda bekleyen (tarihi olmayan) abonelik kotalarından belirtilen sayıda siler."""
     cid = _musteri_bul(musteri_adi)
-    if not cid: return f"Hata: '{musteri_adi}' isimli müşteri bulunamadı."
+    if not cid:
+        return f"Hata: '{musteri_adi}' isimli müşteri bulunamadı."
 
     bekleyenler = [j for j in st.session_state.db_data.get('jobs', [])
                    if j.get('customer_id') == cid and j.get('job_tag') == 'subscription' and not j.get('date')]
     if not bekleyenler:
-        return f"Hata: {musteri_adi} için havuzda bekleyen (tarihsiz) kota bulunamadı."
+        return f"Hata: {musteri_adi} için havuzda bekleyen kota yok."
 
     silinecekler = bekleyenler[:int(silinecek_kota)]
     for j in silinecekler:
         add_to_queue(f"🤖 Kota Sil: {musteri_adi}", "DELETE FROM jobs WHERE id=%s", (j['id'],))
 
-    return f"Başarılı! {musteri_adi} müşterisinin havuzundan {len(silinecekler)} kota silindi."
+    return f"Kuyruğa eklendi: {musteri_adi} havuzundan {len(silinecekler)} kota silinecek."
+
+
+def ai_kota_yerlestir(musteri_adi: str, tarih: str, adet: int = 1) -> str:
+    """Havuzda bekleyen abonelik kotasını/kotalarını belirli bir güne yerleştirir (takvime yazar)."""
+    cid = _musteri_bul(musteri_adi)
+    if not cid:
+        return f"Hata: '{musteri_adi}' isimli müşteri bulunamadı."
+    ds = ai_tarih(tarih)
+    if not ds:
+        return "Hata: tarih anlaşılmadı, GG.AA.YYYY biçiminde gönder."
+
+    bekleyenler = [j for j in st.session_state.db_data.get('jobs', [])
+                   if j.get('customer_id') == cid and j.get('job_tag') == 'subscription' and not (j.get('date') or '').strip()]
+    if not bekleyenler:
+        return f"Hata: {musteri_adi} için havuzda bekleyen kota yok. ai_kota_ekle ile kota ekleyebilirim."
+
+    secilen = bekleyenler[:max(1, int(adet))]
+    for j in secilen:
+        add_to_queue(
+            f"🤖 Kota Yerleştir: {musteri_adi}",
+            "UPDATE jobs SET date=%s WHERE id=%s",
+            (ds, j['id']),
+        )
+        j['date'] = ds
+    return f"Kuyruğa eklendi: {musteri_adi} için {len(secilen)} kota {ds} tarihine yerleştirilecek."
+
 
 def ai_kisi_ekle(musteri_adi: str, tarih: str, personel_tipi: str, yevmiye: float = 0.0) -> str:
-    """Belirli bir tarihte zaten planlanmış bir işe, ek personel (kişi sayısını artırmak için) ekler.
-    personel_tipi 'ogrenci' veya 'pro' olmalı. Müşteriden ek ücret alınmaz (fiyat zaten ilk kayıtta alınmıştır, is_prepaid=0)."""
+    """Zaten planlanmış bir işe ek personel (kişi) ekler. personel_tipi 'ogrenci' veya 'pro'."""
     cid = _musteri_bul(musteri_adi)
-    if not cid: return f"Hata: '{musteri_adi}' isimli müşteri bulunamadı."
-
-    mevcut = [j for j in st.session_state.db_data.get('jobs', []) if j.get('customer_id') == cid and j.get('date') == tarih]
+    if not cid:
+        return f"Hata: '{musteri_adi}' isimli müşteri bulunamadı."
+    ds = ai_tarih(tarih)
+    mevcut = _ai_musteri_isleri(cid, ds)
     if not mevcut:
-        return f"Hata: {musteri_adi} için {tarih} tarihinde mevcut bir iş bulunamadı. Yeni iş için ai_is_ekle kullanın."
+        return f"Hata: {musteri_adi} için {ds or tarih} tarihinde iş yok. Yeni iş için ai_is_ekle kullan."
 
     gid = mevcut[0].get('group_id') or str(uuid.uuid4())[:8]
     tag = mevcut[0].get('job_tag', 'one_time')
-    jt = 'student' if personel_tipi.lower().startswith('ogr') or personel_tipi.lower().startswith('öğr') else 'pro'
+    jt = _ai_tip(personel_tipi)
 
     query = "INSERT INTO jobs (group_id, date, customer_id, job_type, price_worker, price_customer, job_tag, is_prepaid) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
-    params = (gid, tarih, cid, jt, float(yevmiye), 0.0, tag, 0)
-    add_to_queue(f"🤖 Kişi Ekle: {musteri_adi}", query, params)
-    return f"Başarılı! {musteri_adi} için {tarih} tarihindeki işe 1 kişi daha eklendi."
+    add_to_queue(f"🤖 Kişi Ekle: {musteri_adi}", query, (gid, ds, cid, jt, float(yevmiye), 0.0, tag, 0))
+    return f"Kuyruğa eklendi: {musteri_adi} · {ds} işine 1 {'öğrenci' if jt == 'student' else 'profesyonel'} eklenecek."
+
 
 def ai_kisi_sil(musteri_adi: str, tarih: str, adet: int = 1) -> str:
-    """Belirli bir tarihte planlanmış bir işten, kişi sayısını azaltmak için belirtilen sayıda personel kaydını siler.
-    Mümkünse henüz atanmamış (boş) kayıtlar öncelikli silinir."""
+    """Planlanmış bir işten kişi sayısını azaltır; önce atanmamış kayıtlar silinir."""
     cid = _musteri_bul(musteri_adi)
-    if not cid: return f"Hata: '{musteri_adi}' isimli müşteri bulunamadı."
-
-    mevcut = [j for j in st.session_state.db_data.get('jobs', []) if j.get('customer_id') == cid and j.get('date') == tarih]
+    if not cid:
+        return f"Hata: '{musteri_adi}' isimli müşteri bulunamadı."
+    ds = ai_tarih(tarih)
+    mevcut = _ai_musteri_isleri(cid, ds)
     if not mevcut:
-        return f"Hata: {musteri_adi} için {tarih} tarihinde iş bulunamadı."
+        return f"Hata: {musteri_adi} için {ds or tarih} tarihinde iş yok."
 
     mevcut.sort(key=lambda j: 0 if (not j.get('assigned_student_id') and not j.get('assigned_pro_id')) else 1)
     silinecekler = mevcut[:int(adet)]
     for j in silinecekler:
         add_to_queue(f"🤖 Kişi Sil: {musteri_adi}", "DELETE FROM jobs WHERE id=%s", (j['id'],))
 
-    return f"Başarılı! {musteri_adi} için {tarih} tarihindeki işten {len(silinecekler)} kişi kaldırıldı."
+    return f"Kuyruğa eklendi: {musteri_adi} · {ds} işinden {len(silinecekler)} kişi çıkarılacak."
+
+
+def ai_personel_ata(musteri_adi: str, tarih: str, isimler: list[str]) -> str:
+    """Belirli bir gündeki işin personel slotlarına isimle atama yapar (öğrenci/pro/servis listesinden)."""
+    cid = _musteri_bul(musteri_adi)
+    if not cid:
+        return f"Hata: '{musteri_adi}' isimli müşteri bulunamadı."
+    ds = ai_tarih(tarih)
+    mevcut = _ai_musteri_isleri(cid, ds)
+    if not mevcut:
+        return f"Hata: {musteri_adi} için {ds or tarih} tarihinde iş yok."
+
+    atanan, bulunamayan, yer_yok = [], [], 0
+    for i, ad in enumerate([str(x) for x in (isimler or []) if str(x).strip()]):
+        kisi = _ai_kisi(ad)
+        if not kisi:
+            bulunamayan.append(ad)
+            continue
+        if i >= len(mevcut):
+            yer_yok += 1
+            continue
+        row = mevcut[i]
+        if row.get('id') is None or str(row.get('id')).startswith('tmp_'):
+            return "Hata: bu iş henüz kaydedilmedi. Önce kuyruğu kaydedin, sonra atama yapılabilir."
+        query, params = personnel_assign_sql(kisi, row['id'])
+        add_to_queue(f"🤖 Atama: {kisi['name']}", query, params)
+        apply_person_to_row(row, kisi)
+        atanan.append(kisi['name'])
+
+    if not atanan and not bulunamayan:
+        return "Hata: atanacak isim verilmedi."
+    parcalar = []
+    if atanan:
+        parcalar.append(f"{ds} · {musteri_adi}: " + ", ".join(atanan) + " atandı (kuyrukta)")
+    if bulunamayan:
+        parcalar.append("bulunamayan isim: " + ", ".join(bulunamayan))
+    if yer_yok:
+        parcalar.append(f"{yer_yok} isim için boş personel slotu kalmadı (ai_kisi_ekle ile slot eklenebilir)")
+    return ". ".join(parcalar) + "."
+
+
+def ai_etiket_degistir(musteri_adi: str, tarih: str, etiket: str) -> str:
+    """Bir günün işinin etiketini değiştirir: tek seferlik / otel / anahtar teslim / abonelik."""
+    cid = _musteri_bul(musteri_adi)
+    if not cid:
+        return f"Hata: '{musteri_adi}' isimli müşteri bulunamadı."
+    ds = ai_tarih(tarih)
+    mevcut = _ai_musteri_isleri(cid, ds)
+    if not mevcut:
+        return f"Hata: {musteri_adi} için {ds or tarih} tarihinde iş yok."
+    yeni = _ai_etiket(etiket)
+    add_to_queue(
+        f"🤖 Etiket: {musteri_adi}",
+        "UPDATE jobs SET job_tag=%s WHERE customer_id=%s AND date=%s",
+        (yeni, cid, ds),
+    )
+    return f"Kuyruğa eklendi: {musteri_adi} · {ds} işi '{job_tag_label(yeni)}' etiketine geçecek."
+
+
+def ai_fiyat_guncelle(musteri_adi: str, tarih: str, musteri_tutari: float) -> str:
+    """Bir gündeki işin müşteriden alınacak tutarını günceller (tutar ilk satıra yazılır)."""
+    cid = _musteri_bul(musteri_adi)
+    if not cid:
+        return f"Hata: '{musteri_adi}' isimli müşteri bulunamadı."
+    ds = ai_tarih(tarih)
+    mevcut = _ai_musteri_isleri(cid, ds)
+    if not mevcut:
+        return f"Hata: {musteri_adi} için {ds or tarih} tarihinde iş yok."
+    ilk = mevcut[0]
+    add_to_queue(
+        f"🤖 Fiyat: {musteri_adi}",
+        "UPDATE jobs SET price_customer=0, is_prepaid=0 WHERE customer_id=%s AND date=%s",
+        (cid, ds),
+    )
+    add_to_queue(
+        f"🤖 Fiyat: {musteri_adi}",
+        "UPDATE jobs SET price_customer=%s, is_prepaid=%s WHERE id=%s",
+        (float(musteri_tutari), 1 if float(musteri_tutari) > 0 else 0, ilk['id']),
+    )
+    return f"Kuyruğa eklendi: {musteri_adi} · {ds} işinin müşteri tutarı {float(musteri_tutari):,.0f} ₺ olacak."
+
+
+def ai_tahsilat_isaretle(musteri_adi: str, tarih: str) -> str:
+    """Bir gündeki işin müşteri tahsilatını 'alındı' olarak işaretler."""
+    cid = _musteri_bul(musteri_adi)
+    if not cid:
+        return f"Hata: '{musteri_adi}' isimli müşteri bulunamadı."
+    ds = ai_tarih(tarih)
+    mevcut = [j for j in _ai_musteri_isleri(cid, ds) if float(j.get('price_customer') or 0) > 0]
+    if not mevcut:
+        return f"Hata: {musteri_adi} · {ds or tarih} için tahsil edilecek tutar bulunamadı."
+    for j in mevcut:
+        add_to_queue(f"🤖 Tahsilat: {musteri_adi}", "UPDATE jobs SET is_collected=1 WHERE id=%s", (j['id'],))
+    toplam = sum(float(j.get('price_customer') or 0) for j in mevcut)
+    return f"Kuyruğa eklendi: {musteri_adi} · {ds} · {toplam:,.0f} ₺ tahsil edildi olarak işaretlenecek."
+
+
+def ai_musteri_ekle(ad: str, telefon: str = "", konum_url: str = "") -> str:
+    """Yeni müşteri kaydı oluşturur. Kaydedilmeden o müşteriye iş girilemez."""
+    if not str(ad or "").strip():
+        return "Hata: müşteri adı boş."
+    mevcut, _ = _ai_musteri(ad)
+    if mevcut:
+        return f"'{mevcut['name']}' zaten kayıtlı, yeniden eklemeye gerek yok."
+    add_to_queue(
+        f"🤖 Müşteri Ekle: {ad}",
+        "INSERT INTO customers (name, phone, location) VALUES (%s, %s, %s)",
+        (str(ad).strip(), str(telefon or "").strip(), str(konum_url or "").strip()),
+    )
+    return (
+        f"Kuyruğa eklendi: '{ad}' müşterisi. Önce 'DEĞİŞİKLİKLERİ KAYDET' ile kaydedilmeli, "
+        "sonra bu müşteriye iş girilebilir."
+    )
+
+
+def ai_personel_ekle(ad: str, tip: str, telefon: str = "", maas: float = 0.0) -> str:
+    """Yeni personel kaydı: tip 'pro' (profesyonel) veya 'ogrenci'."""
+    if not str(ad or "").strip():
+        return "Hata: personel adı boş."
+    if _ai_tip(tip) == "student":
+        add_to_queue(
+            f"🤖 Öğrenci Ekle: {ad}",
+            "INSERT INTO students (name, phone) VALUES (%s, %s)",
+            (str(ad).strip(), str(telefon or "").strip()),
+        )
+        return f"Kuyruğa eklendi: '{ad}' öğrenci olarak eklenecek."
+    add_to_queue(
+        f"🤖 Pro Ekle: {ad}",
+        "INSERT INTO professionals (name, phone, salary) VALUES (%s, %s, %s)",
+        (str(ad).strip(), str(telefon or "").strip(), float(maas or 0)),
+    )
+    return f"Kuyruğa eklendi: '{ad}' profesyonel olarak eklenecek."
+
 
 def ai_gider_ekle(tarih: str, aciklama: str, tutar: float) -> str:
-    """Belirli bir güne, kira/malzeme/yakıt gibi ekstra bir gider kaydı ekler ('expenses' tablosu)."""
-    query = "INSERT INTO expenses (date, description, amount) VALUES (%s, %s, %s)"
-    params = (tarih, aciklama, float(tutar))
-    add_to_queue(f"🤖 Gider Ekle: {aciklama}", query, params)
-    return f"Başarılı! {tarih} tarihine '{aciklama}' açıklamasıyla {tutar} ₺ gider eklendi."
+    """Belirli bir güne kira/malzeme/yakıt gibi ekstra gider kaydı ekler."""
+    ds = ai_tarih(tarih) or datetime.now().strftime("%d.%m.%Y")
+    add_to_queue(
+        f"🤖 Gider Ekle: {aciklama}",
+        "INSERT INTO expenses (date, description, amount) VALUES (%s, %s, %s)",
+        (ds, aciklama, float(tutar)),
+    )
+    return f"Kuyruğa eklendi: {ds} · '{aciklama}' · {float(tutar):,.0f} ₺ gider."
+
 
 def ai_not_ekle(tarih: str, not_metni: str) -> str:
-    """Belirli bir güne serbest metin not ekler. 'daily_notes' tablosunda tarih başına tek satır tutulduğu için,
-    o tarihte zaten bir not varsa yenisi altına eklenir (üzerine yazılmaz)."""
-    mevcut_not = next((n.get('note') or '' for n in st.session_state.db_data.get('notes', []) if n.get('date') == tarih), '')
+    """Belirli bir güne serbest metin not ekler; o günde not varsa altına eklenir."""
+    ds = ai_tarih(tarih) or datetime.now().strftime("%d.%m.%Y")
+    mevcut_not = next((n.get('note') or '' for n in st.session_state.db_data.get('notes', []) if n.get('date') == ds), '')
     birlesik_not = f"{mevcut_not}\n{not_metni}".strip() if mevcut_not else not_metni
 
     query = """INSERT INTO daily_notes (date, note) VALUES (%s, %s)
                ON CONFLICT (date) DO UPDATE SET note = EXCLUDED.note"""
-    params = (tarih, birlesik_not)
-    add_to_queue(f"🤖 Not Ekle: {tarih}", query, params)
-    return f"Başarılı! {tarih} tarihine not eklendi: '{not_metni}'"
+    add_to_queue(f"🤖 Not Ekle: {ds}", query, (ds, birlesik_not))
+    return f"Kuyruğa eklendi: {ds} notu → '{not_metni}'"
+
 
 def ai_maas_ode(personel_adi: str, tutar: float, tarih: str = None) -> str:
-    """Aylık maaşla çalışan bir profesyonele maaş ödemesi kaydeder ('salary_payments' tablosu)."""
+    """Aylık maaşla çalışan profesyonele maaş ödemesi kaydeder."""
     pro = _personel_bul(personel_adi)
-    if not pro: return f"Hata: '{personel_adi}' isimli personel bulunamadı."
+    if not pro:
+        return f"Hata: '{personel_adi}' isimli profesyonel bulunamadı."
 
-    if not tarih: tarih = datetime.now().strftime("%d.%m.%Y")
-    mk = f"{tarih.split('.')[1]}-{tarih.split('.')[2]}"
+    ds = ai_tarih(tarih) or datetime.now().strftime("%d.%m.%Y")
+    mk = f"{ds.split('.')[1]}-{ds.split('.')[2]}"
     query = "INSERT INTO salary_payments (pro_id,amount,payment_date,month_year,payment_type) VALUES (%s,%s,%s,%s,'monthly')"
-    params = (pro['id'], float(tutar), tarih, mk)
-    add_to_queue(f"🤖 Maaş Öde: {personel_adi}", query, params)
-    return f"Başarılı! {personel_adi} isimli personele {tutar} ₺ maaş ödemesi kaydedildi."
+    add_to_queue(f"🤖 Maaş Öde: {pro['name']}", query, (pro['id'], float(tutar), ds, mk))
+    return f"Kuyruğa eklendi: {pro['name']} · {float(tutar):,.0f} ₺ maaş ({mk})."
+
 
 def ai_gunluk_ucret_ode(personel_adi: str, tarih: str, tutar: float) -> str:
-    """Günlük (yevmiyeli) çalışan bir personele, belirli bir gün için yapılan ödemeyi kaydeder.
-    Ayrı bir günlük ücret tablosu olmadığı için genel 'transactions' kayıt defterine
-    type='expense', category='gunluk_ucret' olarak işlenir.
+    """Günlük (yevmiyeli) çalışan personele belirli bir gün için yapılan ödemeyi kaydeder.
     Aylık maaşlı personel için bu aracı DEĞİL, ai_maas_ode aracını kullan."""
     pro = _personel_bul(personel_adi)
-    if not pro: return f"Hata: '{personel_adi}' isimli personel bulunamadı."
+    if not pro:
+        return f"Hata: '{personel_adi}' isimli personel bulunamadı."
 
+    ds = ai_tarih(tarih) or datetime.now().strftime("%d.%m.%Y")
     query = "INSERT INTO transactions (date, type, category, amount, description, related_id) VALUES (%s, %s, %s, %s, %s, %s)"
-    params = (tarih, 'expense', 'gunluk_ucret', float(tutar), f"{personel_adi} - günlük ücret", pro['id'])
-    add_to_queue(f"🤖 Günlük Ücret: {personel_adi}", query, params)
-    return f"Başarılı! {personel_adi} isimli personele {tarih} tarihi için {tutar} ₺ günlük ücret ödemesi kaydedildi."
+    params = (ds, 'expense', 'gunluk_ucret', float(tutar), f"{pro['name']} - günlük ücret", pro['id'])
+    add_to_queue(f"🤖 Günlük Ücret: {pro['name']}", query, params)
+    return f"Kuyruğa eklendi: {pro['name']} · {ds} · {float(tutar):,.0f} ₺ günlük ücret."
+
+
+# --- 🔎 AI OKUMA ARAÇLARI (soru cevaplama) ---
+
+def _ai_ozet_meta():
+    db_data = st.session_state.db_data
+    return (
+        build_subscription_calendar_meta(db_data.get('jobs', [])),
+        db_data.get('pros', []),
+        db_data.get('students', []),
+    )
+
+
+def ai_gun_ozeti(tarih: str) -> str:
+    """Belirli bir günün iş listesi: müşteri, etiket, kişi sayısı, kadro isimleri, ciro ve kâr."""
+    ds = ai_tarih(tarih)
+    if not ds:
+        return "Hata: tarih anlaşılmadı."
+    meta, pros, students = _ai_ozet_meta()
+    gun = datetime.strptime(ds, "%d.%m.%Y").date()
+    ozetler = build_visit_summaries(
+        st.session_state.db_data.get('jobs', []),
+        date_from=gun, date_to=gun, meta=meta, pros=pros, students=students,
+    )
+    if not ozetler:
+        return f"{ds}: planlanmış iş yok."
+    satir = [f"{ds} · {len(ozetler)} ziyaret:"]
+    for s in ozetler:
+        satir.append(
+            f"- {s['customer']} · {s['tag_label']}{s['sub_label']} · {s['kisi']} kişi "
+            f"({s['kadro_isimleri']}) · ciro {s['ciro']:,.0f} ₺ · kâr {s['kar']:,.0f} ₺"
+        )
+    top = aggregate_visit_summaries(ozetler)
+    satir.append(f"Toplam: ciro {top['ciro']:,.0f} ₺, maliyet {top['maliyet']:,.0f} ₺, kâr {top['kar']:,.0f} ₺.")
+    return "\n".join(satir)
+
+
+def ai_musteri_ozeti(musteri_adi: str, son_kayit: int = 8) -> str:
+    """Bir müşterinin geçmiş işleri, toplam ciro/kâr ve bekleyen kotaları."""
+    musteri, adaylar = _ai_musteri(musteri_adi)
+    if not musteri:
+        return f"Hata: '{musteri_adi}' bulunamadı." + (f" Adaylar: {', '.join(adaylar)}" if adaylar else "")
+    meta, pros, students = _ai_ozet_meta()
+    ozetler = build_visit_summaries(
+        st.session_state.db_data.get('jobs', []),
+        customer_id=musteri['id'], meta=meta, pros=pros, students=students,
+    )
+    bekleyen = len({
+        (j.get('group_id') or '') for j in st.session_state.db_data.get('jobs', [])
+        if j.get('customer_id') == musteri['id'] and j.get('job_tag') == 'subscription'
+        and not (j.get('date') or '').strip()
+    } - {''})
+    if not ozetler:
+        return f"{musteri['name']}: tarihli iş kaydı yok. Havuzda bekleyen kota: {bekleyen}."
+    top = aggregate_visit_summaries(ozetler)
+    satir = [
+        f"{musteri['name']} · {top['visits']} ziyaret · ciro {top['ciro']:,.0f} ₺ · "
+        f"kâr {top['kar']:,.0f} ₺ · bekleyen kota {bekleyen}. Son işler:"
+    ]
+    for s in ozetler[:max(1, int(son_kayit))]:
+        satir.append(
+            f"- {s['date']} · {s['tag_label']} · {s['kisi']} kişi ({s['kadro_isimleri']}) · "
+            f"ciro {s['ciro']:,.0f} ₺ · kâr {s['kar']:,.0f} ₺"
+        )
+    return "\n".join(satir)
+
+
+def ai_ay_ozeti(ay: int = 0, yil: int = 0) -> str:
+    """Bir ayın toplam ciro/maliyet/kâr özeti, etiket dağılımı ve en kârlı müşteriler."""
+    bugun = date.today()
+    sm = int(ay) if ay else bugun.month
+    sy = int(yil) if yil else bugun.year
+    meta, pros, students = _ai_ozet_meta()
+    ilk = date(sy, sm, 1)
+    son = date(sy, sm, calendar.monthrange(sy, sm)[1])
+    ozetler = build_visit_summaries(
+        st.session_state.db_data.get('jobs', []),
+        date_from=ilk, date_to=son, meta=meta, pros=pros, students=students,
+    )
+    if not ozetler:
+        return f"{sm:02d}.{sy}: iş kaydı yok."
+    top = aggregate_visit_summaries(ozetler)
+    giderler = sum(
+        float(e.get('amount') or 0) for e in st.session_state.db_data.get('expenses', [])
+        if (e.get('date') or '').endswith(f".{sm:02d}.{sy}")
+    )
+    satir = [
+        f"{sm:02d}.{sy} · {top['visits']} ziyaret · ciro {top['ciro']:,.0f} ₺ · "
+        f"personel maliyeti {top['maliyet']:,.0f} ₺ · ek gider {giderler:,.0f} ₺ · "
+        f"net {top['kar'] - giderler:,.0f} ₺.",
+        "Etiket dağılımı:",
+    ]
+    for tag, tutar in ciro_by_tag(ozetler).items():
+        if tutar > 0:
+            satir.append(f"- {job_tag_label(tag)}: {tutar:,.0f} ₺")
+    satir.append("En kârlı müşteriler:")
+    for r in customer_ranking_from_summaries(ozetler)[:5]:
+        satir.append(f"- {r['name']}: {r['visits']} ziyaret · kâr {r['kar']:,.0f} ₺")
+    return "\n".join(satir)
+
+
+def ai_bekleyen_kotalar() -> str:
+    """Havuzda bekleyen (tarihi olmayan) tüm abonelik kotalarını müşteri bazında listeler."""
+    sayac = {}
+    for j in st.session_state.db_data.get('jobs', []):
+        if j.get('job_tag') != 'subscription' or (j.get('date') or '').strip():
+            continue
+        ad = j.get('name') or '—'
+        sayac.setdefault(ad, set()).add(j.get('group_id') or f"row{j.get('id')}")
+    if not sayac:
+        return "Havuzda bekleyen kota yok."
+    return "Bekleyen kotalar:\n" + "\n".join(
+        f"- {ad}: {len(gids)} kota" for ad, gids in sorted(sayac.items())
+    )
+
+
+def ai_liste(tip: str = "musteri") -> str:
+    """Kayıtlı isimleri listeler: tip 'musteri', 'pro', 'ogrenci' veya 'servis'."""
+    s = str(tip or "").casefold()
+    db_data = st.session_state.db_data
+    if s.startswith("mus") or s.startswith("müş"):
+        adlar = [c.get('name') for c in db_data.get('customers', [])]
+        baslik = "Müşteriler"
+    elif s.startswith("ogr") or s.startswith("öğr"):
+        adlar = [p.get('name') for p in db_data.get('students', [])]
+        baslik = "Öğrenciler"
+    elif s.startswith("ser"):
+        adlar = [p.get('name') for p in db_data.get('service_personnel', [])]
+        baslik = "Servis personeli"
+    else:
+        adlar = [p.get('name') for p in db_data.get('pros', [])]
+        baslik = "Profesyoneller"
+    adlar = [a for a in adlar if a]
+    if not adlar:
+        return f"{baslik}: kayıt yok."
+    return f"{baslik} ({len(adlar)}): " + ", ".join(adlar)
+
+
+AI_ARACLARI = [
+    ai_is_ekle, ai_is_tasi, ai_is_iptal,
+    ai_kota_ekle, ai_kota_sil, ai_kota_yerlestir,
+    ai_kisi_ekle, ai_kisi_sil, ai_personel_ata,
+    ai_etiket_degistir, ai_fiyat_guncelle, ai_tahsilat_isaretle,
+    ai_musteri_ekle, ai_personel_ekle,
+    ai_gider_ekle, ai_not_ekle,
+    ai_maas_ode, ai_gunluk_ucret_ode,
+    ai_gun_ozeti, ai_musteri_ozeti, ai_ay_ozeti, ai_bekleyen_kotalar, ai_liste,
+]
 # ==========================================
 # ARAYÜZ SİDEBAR
 # ==========================================
@@ -1459,87 +1996,152 @@ with tabs[6]:
     }, "C")
 
 # ==========================================
-# TAB 8: 🤖 YENİ - AI ASİSTAN (NLP İLE İŞ EKLEME/TAŞIMA/SİLME)
+# TAB 8: 🤖 AI ASİSTAN (doğal dille tam iş girişi + sorgulama)
 with tabs[7]:
     _ai_start = __import__("time").perf_counter()
-    st.markdown("### 🤖 Yapay Zeka Asistanı ile Hızlı Komutlar")
-    st.info("💡 Asistana ne istediğinizi doğal bir cümleyle söyleyin. İş ekleyebilir, tarih taşıyabilir, iptal edebilir, kota ekleyip çıkarabilir, kişi sayısını değiştirebilir, gider/not girebilir ve maaş/yevmiye ödemesi kaydedebilir.\n\n*Örnekler:*\n- *'Ebru Baykanın 2 temmuzdaki kotasını 3 temmuza taşı.'*\n- *'Ahmet beye yarın 2 profesyonel gidecek, fiyat 2000.'*\n- *'Mehmetin bugünkü işini tamamen iptal et.'*\n- *'Ayşe hanımın aboneliğine 3 kota daha ekle.'*\n- *'Can'ın haftaya bekleyen 2 kotasını sil.'*\n- *'Bugün Mehmet'in işine 1 kişi daha ekle, yevmiyesi 800.'*\n- *'Yarınki işten 1 kişi eksilt.'*\n- *'Bugüne 500 TL yakıt gideri ekle.'*\n- *'Yarına not düş: müşteri anahtarı komşuda bırakacak.'*\n- *'Ali'ye 15000 TL maaş öde.'*\n- *'Veli'ye bugünkü yevmiyesi olan 900 TL'yi öde.'*")
-    
+    if "ai_chat" not in st.session_state:
+        st.session_state.ai_chat = []
+
+    st.markdown("### 🤖 Asistan")
+    st.caption(
+        "Ne istediğinizi yazın; asistan panelin kendi giriş mantığıyla işi kurar ve kuyruğa atar. "
+        "Hiçbir şey siz onaylamadan veritabanına yazılmaz."
+    )
+    with st.expander("💡 Neler yapabilir?"):
+        st.markdown(
+            "**İş girişi (formun tamamı):** *'Ahmet Yılmaz'a yarın 2 profesyonel 1 öğrenci gitsin, "
+            "pro yevmiyesi 1500 öğrenci 800, müşteriden 6000 alacağız, otel işi.'*\n\n"
+            "**Çok günlü iş:** *'Hilton'a 12, 15 ve 18 eylül günleri 3 pro gitsin, günlük 5000.'*\n\n"
+            "**Abonelik:** *'Ayşe hanıma 4 kotalı abonelik aç, ilk ödeme 8000, yevmiye 1200.'*\n\n"
+            "**Kota işlemleri:** *'Ayşe'nin bekleyen kotasından birini cumaya koy.'* · "
+            "*'2 kota daha ekle.'* · *'Havuzdan 1 kota sil.'*\n\n"
+            "**İsimle personel atama:** *'Yarın Hilton'a Ali ve Veli gitsin.'*\n\n"
+            "**Düzeltme:** *'Mehmet'in bugünkü işini cumartesiye taşı.'* · *'Fiyatı 7500 yap.'* · "
+            "*'Etiketini anahtar teslim yap.'* · *'Tahsil edildi işaretle.'*\n\n"
+            "**Soru sorma:** *'Yarın kimler var?'* · *'Bu ay ne kadar kâr ettik?'* · "
+            "*'Hilton'la geçmişte neler yaptık?'* · *'Bekleyen kotalar kimde?'*\n\n"
+            "**Kayıt açma:** *'Yeni müşteri: Deniz Apartmanı, telefonu 0532...'*"
+        )
+
+    if st.session_state.pending_actions:
+        with st.expander(f"⏳ Kuyrukta {len(st.session_state.pending_actions)} işlem", expanded=True):
+            for _a in st.session_state.pending_actions[-20:]:
+                st.caption(f"• {_a['desc']}")
+            if st.button("💾 Kuyruğu kaydet", type="primary", key="ai_commit_btn"):
+                with st.spinner("Sunucuya yazılıyor..."):
+                    commit_queue()
+
     if "GEMINI_API_KEY" not in st.secrets:
-        st.error("⚠️ Lütfen Streamlit Secrets ayarlarına GEMINI_API_KEY ekleyin.")
+        st.error("⚠️ Streamlit Secrets ayarlarına GEMINI_API_KEY ekleyin.")
     else:
         import google.generativeai as genai
         _model_start = __import__("time").perf_counter()
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        bugunun_tarihi_str = datetime.now().strftime("%d.%m.%Y")
-        
-        # Yapay Zekaya verilecek kimlik/görev ve çalışma mantığı
+
+        _bugun_dt = datetime.now()
+        _mus_adlari = [c.get('name') for c in db.get('customers', []) if c.get('name')]
+        _pro_adlari = [p.get('name') for p in db.get('pros', []) if p.get('name')]
+        _ogr_adlari = [s.get('name') for s in db.get('students', []) if s.get('name')]
+        _srv_adlari = [s.get('name') for s in db.get('service_personnel', []) if s.get('name')]
+
+        _yakin = []
+        for _i in range(8):
+            _g = (_bugun_dt + timedelta(days=_i)).strftime("%d.%m.%Y")
+            _adlar = sorted({j.get('name') or '—' for j in jobs_list if (j.get('date') or '') == _g})
+            if _adlar:
+                _yakin.append(f"{_g}: " + ", ".join(_adlar))
+
+        _havuz = {}
+        for _j in jobs_list:
+            if _j.get('job_tag') == 'subscription' and not (_j.get('date') or '').strip():
+                _havuz.setdefault(_j.get('name') or '—', set()).add(_j.get('group_id') or str(_j.get('id')))
+
         system_instruction = f"""
-        Sen bir Temizlik/Vardiya firmasının gelişmiş ERP ve Vardiya Yönetim Asistanısın.
-        Görevin, kullanıcının girdiği metindeki niyeti anlamak ve uygun aracı çalıştırmaktır.
-        
-        Bugünün tarihi: {bugunun_tarihi_str}. Kullanıcı 'yarın', 'bugün', 'haftaya' gibi terimler kullanırsa tarihi buna göre DD.MM.YYYY formatına çevir.
+Sen bir temizlik/vardiya firmasının panelinde çalışan operasyon asistanısın. Kullanıcı Türkçe yazar,
+sen de Türkçe cevap verirsin. Görevin: niyeti anlamak, doğru aracı çağırmak ve ne yaptığını net söylemek.
 
-        İŞ MODELİ:
-        - Abonelik işlerinde, ilk kota bir tarihe atanırken müşteriden peşin ücret alınır (price_customer ilk satıra yazılır).
-          Kalan kotalar tarihsiz olarak havuzda bekler; ilerleyen günlerde ihtiyaç oldukça tarihe atanır, gerekirse yeni kota eklenir
-          ya da kullanılmayan kota iptal edilir. Bu sistem SADECE iş takibi amaçlıdır, ekstra ödeme almaz/kesmez.
-        - Her abonelik kotası tam olarak 1 personeli (1 iş satırını) temsil eder. Bir işe birden fazla kişi gidiyorsa,
-          bu birden fazla kota/satır demektir.
-        - Personelin bazılarının maaşı AYLIK (sabit + puantaj), bazılarınınki ise GÜNLÜK (yevmiye, her gün ayrı ödenir) verilir.
-          Aylık maaşlı biri için ai_maas_ode, günlük yevmiyeli biri için ai_gunluk_ucret_ode kullanılır. Hangi tip olduğu belirsizse
-          kullanıcıya varsayılan olarak günlük ödeme mantığıyla (ai_gunluk_ucret_ode) yaklaş, aksi açıkça belirtilmedikçe.
-        - Bir işteki kişi sayısı zamanla değişebilir: iş sahaya çıktıktan sonra ek kişi gerekirse ai_kisi_ekle,
-          kişi azaltılacaksa ai_kisi_sil kullanılır (bunlar tarihe zaten atanmış tekil işler içindir, kota havuzu değildir).
-        - Güne özel ekstra giderler (kira, malzeme, yakıt vb.) için ai_gider_ekle, güne özel serbest notlar için ai_not_ekle kullanılır.
+BUGÜN: {_bugun_dt.strftime('%d.%m.%Y')} ({_bugun_dt.strftime('%A')}). Tüm tarihler GG.AA.YYYY.
+"yarın", "cumaya", "3 temmuz" gibi ifadeleri araçlara olduğu gibi verebilirsin; araçlar çözer.
 
-        ARAÇ SEÇİM KURALLARI:
-        1. "Yeni iş / yeni kayıt" → ai_is_ekle
-           - Bir işe N personel gidecekse veritabanına N ayrı satır eklenir; müşteri toplam tutarı sadece ilk satıra yazılır (araç otomatik yapar).
-           - Belirtilmeyen bilgiler için varsayılanlar: Abonelik=False, Yevmiye=0, Fiyat=0.
-        2. "Taşıma / erteleme / değiştirme (tarih)" → ai_is_tasi. KESİNLİKLE yeni iş ekleme, sadece tarihi güncelle.
-        3. "İptal / tamamen silme (bir tarihteki tüm iş)" → ai_is_iptal
-        4. "Aboneliğe kota/hak ekle" (örn: '2 kota daha ekle', 'aboneliğini uzat') → ai_kota_ekle
-        5. "Abonelikten kota/hak sil" (havuzda bekleyen, henüz tarih verilmemiş) → ai_kota_sil
-        6. "Var olan bir işe/tarihe ek kişi/personel gönder" (kota değil, zaten planlı bir işe ekleme) → ai_kisi_ekle
-        7. "Var olan bir işten kişi/personel azalt" → ai_kisi_sil
-        8. "Güne gider ekle" (kira, malzeme, genel gider vb.) → ai_gider_ekle
-        9. "Güne not/hatırlatma ekle" → ai_not_ekle
-        10. "Aylık maaşlı personele maaş öde" → ai_maas_ode
-        11. "Günlük/yevmiyeli personele o günün ücretini öde" → ai_gunluk_ucret_ode
+KAYITLI MÜŞTERİLER ({len(_mus_adlari)}): {", ".join(_mus_adlari) or "—"}
+PROFESYONELLER: {", ".join(_pro_adlari) or "—"}
+ÖĞRENCİLER: {", ".join(_ogr_adlari) or "—"}
+SERVİS PERSONELİ: {", ".join(_srv_adlari) or "—"}
+ÖNÜMÜZDEKİ 7 GÜN:
+{chr(10).join(_yakin) or "planlı iş yok"}
+HAVUZDA BEKLEYEN KOTALAR: {", ".join(f"{k} ({len(v)})" for k, v in _havuz.items()) or "yok"}
 
-        ASLA aynı işlem için birden fazla araç kullanma. Niyeti net biçimde tespit et ve sadece ilgili aracı çalıştır.
-        Eğer niyet belirsizse, en olası aracı seç ve kullanıcıya ne yaptığını net biçimde özetle.
-        """
-        
+İŞ MODELİ:
+- Bir "iş" = bir müşteriye bir günde yapılan ziyaret. O ziyarete kaç kişi gidiyorsa veritabanında
+  o kadar satır olur; müşteriden alınan tutar yalnızca ilk satıra yazılır (araç otomatik yapar).
+- Personel iki tiptir: "pro" (profesyonel) ve "ogrenci". Yevmiyeleri farklı olabilir; aynı ziyarette
+  karışık kadro olabilir (örn. 2 pro + 1 öğrenci).
+- Etiketler: "tek seferlik", "otel", "anahtar teslim", "abonelik". Ay sonu ciro analizi bu etiketlere göre yapılır.
+- Abonelikte tarih verilmez: "kota" ziyaret hakkıdır, kotalar havuzda bekler ve sonradan güne yerleştirilir
+  (ai_kota_yerlestir). Peşin ödeme ilk kotaya yazılır. Her kota 1 personeli temsil eder.
+- Fiyat modu: "gunluk" tutar her ziyarette alınır, "toplam" tüm iş için bir kez alınır.
+
+ARAÇ KULLANIMI:
+- YENİ İŞ her zaman ai_is_ekle ile ve JSON şemasıyla girilir. Kullanıcının verdiği tüm detayları
+  (tarihler, kadro tipleri ve yevmiyeleri, tutar, fiyat modu, etiket, atanacak isimler, not) JSON'a koy.
+- Birden fazla farklı iş varsa ai_is_ekle'yi her iş için ayrı ayrı çağır.
+- Var olan işi değiştirmek için: ai_is_tasi (tarih), ai_fiyat_guncelle (tutar), ai_etiket_degistir (etiket),
+  ai_kisi_ekle / ai_kisi_sil (kişi sayısı), ai_personel_ata (isimle atama), ai_tahsilat_isaretle (tahsilat),
+  ai_is_iptal (o günün işini tamamen sil). Bunlar için ASLA yeni iş ekleme.
+- Kota işlemleri: ai_kota_ekle, ai_kota_sil (havuzdakinden), ai_kota_yerlestir (havuzdakini güne koy).
+- Kayıt açma: ai_musteri_ekle, ai_personel_ekle. Yeni müşteriye iş girilebilmesi için önce kuyruğun
+  kaydedilmesi gerektiğini kullanıcıya söyle.
+- SORU sorulduğunda yazma aracı çağırma; ai_gun_ozeti, ai_musteri_ozeti, ai_ay_ozeti, ai_bekleyen_kotalar,
+  ai_liste araçlarıyla veriye bak ve cevapla.
+
+DAVRANIŞ KURALLARI:
+1. Müşteri adı listede yoksa uydurma; en yakın adayları sun ve hangisi olduğunu sor.
+2. Eksik bilgi işi bozacaksa (örn. tarih yok, kadro yok) tek bir net soru sor. Bozmayacaksa varsayılanı
+   kullan ve ne varsaydığını söyle: yevmiye 0, tutar 0, kişi sayısı 1, etiket "tek seferlik", fiyat modu "gunluk".
+3. Aynı işlemi iki kez çağırma. Araç "Hata:" ile dönerse kullanıcıya sebebini açıkla, sessizce başka araç deneme.
+4. Cevabın sonunda ne kuyruğa atıldığını tek satırda özetle ve onay için 'Kuyruğu kaydet' demesi gerektiğini hatırlat.
+5. Önceki mesajları dikkate al: "hayır 3 kişi olsun", "onu da cumaya koy" gibi düzeltmeleri bağlamdan çöz.
+"""
+
         try:
             model = genai.GenerativeModel(
-                model_name='gemini-2.5-flash', # veya gemini-1.5-pro
-                tools=[
-                    ai_is_ekle, ai_is_tasi, ai_is_iptal,
-                    ai_kota_ekle, ai_kota_sil,
-                    ai_kisi_ekle, ai_kisi_sil,
-                    ai_gider_ekle, ai_not_ekle,
-                    ai_maas_ode, ai_gunluk_ucret_ode,
-                ],
-                system_instruction=system_instruction
+                model_name=st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash"),
+                tools=AI_ARACLARI,
+                system_instruction=system_instruction,
             )
             perf_log("admin.py:tab_ai", "ai_model_init", {
                 "elapsed_ms": round((__import__("time").perf_counter() - _model_start) * 1000, 2),
             }, "D")
-            
-            user_input = st.text_area("Ne yapmak istiyorsunuz?", placeholder="Komutunuzu buraya yazın...")
-            
-            if st.button("✨ Asistana Gönder (Kuyruğa Ekle)", type="primary"):
-                if user_input:
-                    with st.spinner("Asistan komutunuzu analiz ediyor ve uyguluyor..."):
-                        chat = model.start_chat(enable_automatic_function_calling=True)
-                        response = chat.send_message(user_input)
-                        st.success(response.text)
-                else:
-                    st.warning("Lütfen asistan için bir komut yazın.")
+
+            if st.session_state.ai_chat:
+                if st.button("🧹 Sohbeti temizle", key="ai_clear_btn"):
+                    st.session_state.ai_chat = []
+                    st.rerun()
+
+            for _m in st.session_state.ai_chat:
+                with st.chat_message("user" if _m["role"] == "user" else "assistant"):
+                    st.markdown(_m["text"])
+
+            _soru = st.chat_input("Örn: Ahmet'e yarın 2 pro 1 öğrenci gitsin, müşteriden 6000")
+            if _soru:
+                st.session_state.ai_chat.append({"role": "user", "text": _soru})
+                _gecmis = [
+                    {"role": "user" if m["role"] == "user" else "model", "parts": [m["text"]]}
+                    for m in st.session_state.ai_chat[:-1]
+                ][-12:]
+                with st.spinner("Asistan çalışıyor..."):
+                    try:
+                        _chat = model.start_chat(
+                            history=_gecmis, enable_automatic_function_calling=True,
+                        )
+                        _resp = _chat.send_message(_soru)
+                        _cevap = (getattr(_resp, "text", "") or "").strip() or "İşlem tamamlandı."
+                    except Exception as e:
+                        _cevap = f"⚠️ Asistan hatası: {e}"
+                st.session_state.ai_chat.append({"role": "assistant", "text": _cevap})
+                st.rerun()
         except Exception as e:
-            st.error(f"AI Başlatma Hatası: {e}.")
+            st.error(f"AI başlatma hatası: {e}")
 
     perf_log("admin.py:tab_ai", "tab_ai_render_total", {
         "elapsed_ms": round((__import__("time").perf_counter() - _ai_start) * 1000, 2),

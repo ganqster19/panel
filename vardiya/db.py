@@ -1,5 +1,5 @@
 """Mobil ve servis panelleri için ortak DB bağlantısı."""
-DB_MODULE_VERSION = "2026.09.07-2"  # panellerde gösterilir; dağıtım tazeliğini doğrular
+DB_MODULE_VERSION = "2026.09.09-1"  # panellerde gösterilir; dağıtım tazeliğini doğrular
 
 import calendar
 import math
