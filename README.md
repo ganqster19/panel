@@ -9,8 +9,13 @@ vardiya-panel/
 ├── admin.py              # Admin paneli (finans, analiz, takvim, AI)
 ├── mobil.py              # Mobil yönetici paneli
 ├── servis.py             # Servis ekibi listesi (salt okunur)
+├── api.py                # HTTP API (FastAPI) — panel dışından iş girişi ve asistan
+├── kural_testleri.py     # İş kuralı testleri (veritabanı gerektirmez)
 ├── vardiya/
-│   ├── db.py             # Veritabanı ve iş mantığı
+│   ├── db.py             # Veritabanı ve panel yardımcıları
+│   ├── isakisi.py        # Fiyat tarifesi, kadro, müşteri eşleştirme, abonelik düzeni
+│   ├── islemler.py       # Panel ve API'nin paylaştığı iş operasyonları
+│   ├── asistan.py        # Streamlit'siz asistan (API/CLI/bot için)
 │   ├── auth.py           # Panel şifre koruması
 │   └── perf.py           # Performans ölçümü (opsiyonel)
 ├── .streamlit/
@@ -69,6 +74,62 @@ git push -u origin main
 4. Her app'te **Settings → Secrets** → `.streamlit/secrets.toml.example` şablonunu gerçek değerlerle doldurun.
 
 5. Deploy sonrası **Reboot app** yapın.
+
+## Fiyat tarifesi
+
+Tüm otomatik hesaplar `vardiya/isakisi.py` içindeki `FIYAT` sözlüğünden gelir; tek yerden değişir.
+
+| Kalem | Varsayılan |
+|-------|-----------|
+| Tek seferlik iş, profesyonel (kişi başı, müşteriden) | 4.800 ₺ |
+| Tek seferlik iş, öğrenci (kişi başı, müşteriden) | 2.800 ₺ |
+| Profesyonel yevmiyesi | 2.500 ₺ |
+| Öğrenci yevmiyesi | 1.800 ₺ |
+| Abonelik varsayılan kota | 4 |
+
+Kullanıcı işe kendi tutarını söylerse (örn. "toplam 9600") tarife yerine o tutar kullanılır.
+Abonelik paket ücreti tarifeden hesaplanmaz; asistan tutarı sorar, verilen tutar ilk kotaya yazılır.
+Kota tüketildiğinde gelir yazılmaz, yalnızca personel yevmiyesi gider olarak işlenir.
+
+Kuralları doğrulamak için: `python kural_testleri.py`
+
+## HTTP API
+
+```bash
+pip install -r requirements-api.txt
+
+$env:SUPABASE_HOST="..."; $env:SUPABASE_DB="postgres"; $env:SUPABASE_USER="..."
+$env:SUPABASE_PASSWORD="..."; $env:GEMINI_API_KEY="..."; $env:PANEL_API_KEY="kendi-anahtarınız"
+
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+Tüm isteklerde `X-API-Key` başlığı gerekir.
+
+| Uç nokta | İş |
+|----------|-----|
+| `GET /saglik` | Bağlantı, kayıt sayıları, geçerli tarife |
+| `POST /komut` | Doğal dil: `{"metin": "yarına Emir beye 2 profesyonel gidecek tek seferlik"}` |
+| `POST /is` | AI'sız şemayla iş girişi (tutar verilmezse tarife uygulanır) |
+| `POST /ertele` | `{"musteri": "Nazlı", "yeni_tarih": "haftaya perşembe"}` |
+| `GET /gun/{tarih}` | Günün kadro/ciro/kâr özeti |
+| `GET /ay?ay=9&yil=2026` | Ayın özeti |
+
+`uygula: false` gönderilirse hiçbir şey yazılmaz; yalnızca yapılacak işlemlerin planı döner.
+
+Panelin AI sekmesi ile API aynı çekirdeği (`vardiya/islemler.py`) kullanır: panelde işlemler
+onay kuyruğuna düşer, API'de doğrudan uygulanır.
+
+Kod içinden kullanmak için:
+
+```python
+from vardiya.asistan import Asistan
+
+a = Asistan()
+print(a.komut("nazlı hanımın rezervasyonunu haftaya perşembeye ertele")["cevap"])
+print(a.is_ekle({"musteri": "Emir Kaya", "etiket": "abonelik", "pro_sayisi": 1}))
+a.kapat()
+```
 
 ## Güvenlik
 
