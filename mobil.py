@@ -13,6 +13,7 @@ from psycopg2.extras import execute_values
 from vardiya.db import (
     get_db_connection, load_panel_data, JOB_INSERT_SQL,
     job_musteri_telefon, job_musteri_konum, render_action_link, min_visible_date,
+    MOBIL_HISTORY_MONTHS,
     group_jobs_by_visit, summarize_personnel, format_personnel_badge, format_personnel_html,
     personel_listesi_ozet, expand_personnel_by_type, build_visit_db_rows, visit_group_label,
     visit_delete_action, subscription_label, subscription_labels_merged,
@@ -220,8 +221,16 @@ def parse_tr_date(s):
         return date.today()
 
 
+def mobil_min_date():
+    """Günler ve giderde geriye gidilebilen en eski gün (son 1 ay)."""
+    return min_visible_date(months=MOBIL_HISTORY_MONTHS)
+
+
 def refresh_data():
-    st.session_state.db_data = load_panel_data(admin=False)
+    st.session_state.db_data = load_panel_data(
+        admin=False, retention_months=MOBIL_HISTORY_MONTHS,
+    )
+    st.session_state.mobil_history_months = MOBIL_HISTORY_MONTHS
     st.session_state.pop("mobil_analiz_data", None)
 
 
@@ -229,9 +238,11 @@ def refresh_analysis_data():
     st.session_state.mobil_analiz_data = load_panel_data(admin=True)
 
 
-if not st.session_state.db_data:
-    refresh_data()
-elif "subscription_meta" not in st.session_state.db_data:
+if (
+    not st.session_state.db_data
+    or st.session_state.get("mobil_history_months") != MOBIL_HISTORY_MONTHS
+    or "subscription_meta" not in st.session_state.db_data
+):
     refresh_data()
 
 
@@ -366,7 +377,7 @@ def render_kota_session_controls(sg, sg_gid, key_prefix, sub_meta, default_date_
         new_d = st.date_input(
             "Yeni gün",
             value=parse_tr_date(default_date_str),
-            min_value=min_visible_date(),
+            min_value=mobil_min_date(),
             format="DD.MM.YYYY",
             key=f"kota_date_{key_prefix}",
             label_visibility="collapsed",
@@ -410,7 +421,7 @@ def render_visit_edit_form(group, i, customers, session_label=""):
         ed = st.date_input(
             "Tarih",
             value=parse_tr_date(j.get("date")),
-            min_value=min_visible_date(),
+            min_value=mobil_min_date(),
             format="DD.MM.YYYY",
             key=f"ed_date_{jid}_{i}",
         )
@@ -509,7 +520,7 @@ def sync_month_from_date(ds):
 
 def apply_date_navigation(now):
     """Tüm tarih/ay değişimleri widget'lardan önce — tek kaynak: sel_date."""
-    min_d = min_visible_date()
+    min_d = mobil_min_date()
 
     day_nav = st.session_state.pop("_day_nav", None)
     if day_nav == "prev":
@@ -580,7 +591,7 @@ with b3:
 st.markdown("</div>", unsafe_allow_html=True)
 
 st.caption(
-    f"📊 {len(jobs_list)} iş · {len(personnel)} personel · 📅 {sd_global} · son 1 hafta"
+    f"📊 {len(jobs_list)} iş · {len(personnel)} personel · 📅 {sd_global} · son 1 ay"
     f" · 🔖 {DB_MODULE_VERSION}"
 )
 
@@ -598,7 +609,7 @@ with tab_ekle:
     sc = st.selectbox("Müşteri", ["— Seçin —"] + list(c_map.keys()), key="basit_musteri")
 
     jt = st.radio("Etiket", list(JOB_TAG_ADD_LABELS), key="basit_tip")
-    min_d = min_visible_date()
+    min_d = mobil_min_date()
     tag = job_tag_from_label(jt)
     if is_subscription_tag(tag):
         kota = st.number_input("Kota sayısı", min_value=1, value=4, step=1, key="basit_kota")
@@ -717,13 +728,14 @@ with tab_takvim:
         day_map[d]["jobs"][label]["kisi"] += len(group)
 
     sd = st.session_state.sel_date
-    min_d = min_visible_date()
+    min_d = mobil_min_date()
     cur = parse_tr_date(sd)
 
+    st.caption(f"Geçmiş: son 1 ay ({format_tr_date(min_d)} ve sonrası)")
     st.markdown('<div class="nav-day-btn">', unsafe_allow_html=True)
     nav1, nav2, nav3 = st.columns(3)
     with nav1:
-        if st.button("◀ Dün", key="basit_dun", width="stretch"):
+        if st.button("◀ Dün", key="basit_dun", width="stretch", disabled=cur <= min_d):
             st.session_state._day_nav = "prev"
             st.rerun()
     with nav2:
@@ -829,10 +841,14 @@ with tab_takvim:
             cols = st.columns(3)
             for col_i, day in enumerate(range(row_start, min(row_start + 3, num_days + 1))):
                 ds_btn = f"{day:02d}.{ms}"
+                day_date = date(sy, sm, day)
                 with cols[col_i]:
                     lbl = f"{day} · 👥{day_map[ds_btn]['kisi']}" if ds_btn in day_map else str(day)
                     btn_type = "primary" if ds_btn == sd else "secondary"
-                    if st.button(lbl, key=f"basit_day_{day}", type=btn_type, width="stretch"):
+                    if st.button(
+                        lbl, key=f"basit_day_{day}", type=btn_type,
+                        width="stretch", disabled=day_date < min_d,
+                    ):
                         st.session_state.sel_date = ds_btn
                         st.rerun()
 
@@ -871,7 +887,7 @@ with tab_takvim:
                         pool_date = st.date_input(
                             "Gün",
                             value=parse_tr_date(sd),
-                            min_value=min_visible_date(),
+                            min_value=mobil_min_date(),
                             format="DD.MM.YYYY",
                             key=f"pool_date_{pid}_{gid}",
                             label_visibility="collapsed",
@@ -1072,7 +1088,7 @@ with tab_gider:
     with st.form("basit_gider_form"):
         gisim = st.text_input("İsim", placeholder="Örn. Yakıt, Kira, Malzeme")
         gaciklama = st.text_input("Açıklama", placeholder="Detay (isteğe bağlı)")
-        gtarih = st.date_input("Tarih", max(date.today(), min_visible_date()), min_value=min_visible_date())
+        gtarih = st.date_input("Tarih", max(date.today(), mobil_min_date()), min_value=mobil_min_date())
         gtutar = st.number_input("Miktar (₺)", min_value=0.0, step=50.0)
         if st.form_submit_button("Kuyruğa ekle", type="primary", width="stretch"):
             if not gisim.strip():
@@ -1126,8 +1142,8 @@ with tab_gider:
                     )
                     ed_tarih = st.date_input(
                         "Tarih",
-                        max(parse_tr_date(e.get("date")), min_visible_date()),
-                        min_value=min_visible_date(),
+                        max(parse_tr_date(e.get("date")), mobil_min_date()),
+                        min_value=mobil_min_date(),
                         key=f"g_d_{eid}_{i}",
                     )
                     ed_tutar = st.number_input(

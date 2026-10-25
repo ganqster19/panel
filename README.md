@@ -144,5 +144,5 @@ a.kapat()
 | Panel | Veri erişimi |
 |-------|----------------|
 | `admin.py` | Tüm geçmiş |
-| `mobil.py` | Son 1 hafta + tarihsiz bekleyen kotalar |
+| `mobil.py` | Son 1 ay + tarihsiz bekleyen kotalar |
 | `servis.py` | Son 1 hafta |

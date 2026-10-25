@@ -1,5 +1,5 @@
 """Mobil ve servis panelleri için ortak DB bağlantısı."""
-DB_MODULE_VERSION = "2026.09.09-2"  # panellerde gösterilir; dağıtım tazeliğini doğrular
+DB_MODULE_VERSION = "2026.10.25-1"  # panellerde gösterilir; dağıtım tazeliğini doğrular
 
 import calendar
 import math
@@ -9,7 +9,8 @@ from datetime import datetime, timedelta, date
 from typing import Optional
 from psycopg2.extras import RealDictCursor
 
-RETENTION_DAYS = 6  # son 7 gün (bugün dahil) + tarihsiz kotalar görünür
+RETENTION_DAYS = 6  # servis: son 7 gün (bugün dahil) + tarihsiz kotalar
+MOBIL_HISTORY_MONTHS = 1  # mobil geçmiş görüntüleme: son 1 ay
 
 JOB_INSERT_SQL = """
     INSERT INTO jobs (
@@ -946,9 +947,28 @@ def hesapla_abonelik_yukumluluk(jobs_list, sm: int, sy: int):
     }
 
 
-def min_visible_date() -> date:
-    """Kısıtlı panellerde görülebilir en eski gün (son 1 hafta)."""
-    return date.today() - timedelta(days=RETENTION_DAYS)
+def shift_months(d: date, months: int) -> date:
+    """Takvim ayı kaydırır; ay sonu taşmasını kırpar (31 Mart − 1 ay = 28/29 Şubat)."""
+    idx = d.month - 1 + months
+    year = d.year + idx // 12
+    month = idx % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def min_visible_date(days: int | None = None, months: int | None = None) -> date:
+    """Görülebilir en eski gün. Varsayılan: servis (son 7 gün). Mobil için months=1."""
+    if months:
+        return shift_months(date.today(), -int(months))
+    span = RETENTION_DAYS if days is None else int(days)
+    return date.today() - timedelta(days=span)
+
+
+def _history_cutoff_sql(retention_days: int | None = None, retention_months: int | None = None) -> str:
+    if retention_months:
+        return f"CURRENT_DATE - INTERVAL '{int(retention_months)} months'"
+    span = RETENTION_DAYS if retention_days is None else int(retention_days)
+    return f"CURRENT_DATE - INTERVAL '{span} days'"
 
 
 def parse_tr_date_str(ds) -> Optional[date]:
@@ -970,26 +990,36 @@ def is_date_visible(ds, admin: bool = False) -> bool:
     return d >= min_visible_date()
 
 
-def _job_date_filter_sql(admin: bool) -> str:
+def _job_date_filter_sql(
+    admin: bool,
+    retention_days: int | None = None,
+    retention_months: int | None = None,
+) -> str:
     if admin:
         return ""
+    cutoff = _history_cutoff_sql(retention_days, retention_months)
     return f"""
         AND (
             j.date IS NULL OR TRIM(j.date) = ''
             OR (
                 j.date ~ '^[0-9]{{2}}\\.[0-9]{{2}}\\.[0-9]{{4}}$'
-                AND TO_DATE(j.date, 'DD.MM.YYYY') >= CURRENT_DATE - INTERVAL '{RETENTION_DAYS} days'
+                AND TO_DATE(j.date, 'DD.MM.YYYY') >= {cutoff}
             )
         )
     """
 
 
-def _expense_date_filter_sql(admin: bool) -> str:
+def _expense_date_filter_sql(
+    admin: bool,
+    retention_days: int | None = None,
+    retention_months: int | None = None,
+) -> str:
     if admin:
         return ""
+    cutoff = _history_cutoff_sql(retention_days, retention_months)
     return f"""
         AND e.date ~ '^[0-9]{{2}}\\.[0-9]{{2}}\\.[0-9]{{4}}$'
-        AND TO_DATE(e.date, 'DD.MM.YYYY') >= CURRENT_DATE - INTERVAL '{RETENTION_DAYS} days'
+        AND TO_DATE(e.date, 'DD.MM.YYYY') >= {cutoff}
     """
 
 
@@ -1069,13 +1099,20 @@ def ensure_schema(conn):
     conn.commit()
 
 
-def load_panel_data(admin: bool = False):
-    """admin=True → tam veri. admin=False → son 1 hafta + tarihsiz işler."""
+def load_panel_data(
+    admin: bool = False,
+    retention_days: int | None = None,
+    retention_months: int | None = None,
+):
+    """admin=True → tam veri. admin=False → pencere + tarihsiz işler.
+
+    Varsayılan pencere son 7 gündür (servis). Mobil geçmiş için retention_months=1.
+    """
     conn = get_db_connection()
     try:
         ensure_schema(conn)
-        job_filter = _job_date_filter_sql(admin)
-        exp_filter = _expense_date_filter_sql(admin)
+        job_filter = _job_date_filter_sql(admin, retention_days, retention_months)
+        exp_filter = _expense_date_filter_sql(admin, retention_days, retention_months)
         with conn.cursor() as c:
             data = {"admin_mode": admin}
             c.execute(f"""
